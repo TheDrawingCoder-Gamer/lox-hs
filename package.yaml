@@ -1,0 +1,46 @@
+name:                lox-hs
+version:             0.1.0.0
+#synopsis:
+#description:
+homepage:            https://github.com/TheDrawingCoding-Gamer/lox-hs#readme
+license:             BSD3
+author:              bulby
+maintainer:          bulbyvr@gmail.com
+copyright:           2021 BulbyVR
+category:            Web
+extra-source-files:
+- README.md
+
+dependencies:
+  - base >= 4.7 && < 5
+  - megaparsec
+  - text
+  - repline
+  - haskeline
+  - polysemy
+  - polysemy-plugin
+  - exceptions
+  - unordered-containers
+  - containers
+  - time
+  - parser-combinators
+ghc-options: 
+  - -fplugin=Polysemy.Plugin
+default-extensions:
+  - ImportQualifiedPost
+  - OverloadedStrings
+  - LambdaCase
+  - DataKinds
+  - FlexibleContexts
+  - GADTs
+  - LambdaCase
+  - PolyKinds
+  - RankNTypes
+  - ScopedTypeVariables
+  - TypeApplications
+  - TypeOperators
+  - TypeFamilies
+executables:
+  lox-hs:
+    source-dirs:      src
+    main:             Main.hs
