@@ -1,4 +1,5 @@
-module Lox.Evaluate (lxRun, lxEvaluate) where 
+{-# LANGUAGE RecursiveDo #-}
+module Lox.Evaluate (lxRun, lxEvaluate, lxStmts, lxStmt) where 
 
 import Lox.Types 
 import Data.Text qualified as T
@@ -9,20 +10,22 @@ import Data.HashMap.Strict qualified as HM
 import Polysemy.Fail
 import Polysemy.Haskeline
 import Polysemy.Error
+import Polysemy.Fixpoint
 import Prelude 
 import Data.Bifunctor qualified as BFu
 import Data.Functor (($>))
-import Control.Monad ((=<<))
+import Control.Monad ((=<<), void)
 import Data.Foldable (traverse_)
 import Data.Maybe (maybe, fromMaybe)
 import Data.Bool (bool)
-lxRun :: Members [State LxEnv, Fail, Error ReturnState, Haskeline, Embed IO] r => Either [LxStmt] LxExpr -> Sem r ()
+import Debug.Trace (traceShowId)
+lxRun :: Members LxMembers r => Either [LxStmt] LxExpr -> Sem r ()
 lxRun = \case 
     Left stmts -> lxStmts stmts
     Right expr -> lxEvaluate expr >>= outputStrLn . prettyLoxValue
-lxStmts :: Members [State LxEnv, Fail, Error ReturnState, Haskeline, Embed IO] r =>  [LxStmt] -> Sem r ()
+lxStmts :: Members LxMembers r =>  [LxStmt] -> Sem r ()
 lxStmts = traverse_ lxStmt
-lxStmt :: Members [State LxEnv, Fail, Error ReturnState, Haskeline, Embed IO] r => LxStmt -> Sem r ()
+lxStmt :: Members LxMembers r => LxStmt -> Sem r ()
 lxStmt = \case
   LxExprStmt e -> lxEvaluate e >> pure ()
   LxPrint e -> lxEvaluate e >>= outputStrLn . prettyLoxValue
@@ -33,13 +36,17 @@ lxStmt = \case
   LxWhile b d -> lxWhile b d
   LxFunDecl (FunDecl n (FunInfo ps ss)) -> do
     lxDefine n LvNil
-    lxAssign n <$> LvFun . LoxFun n (LoxFunction $ \args -> do 
-      traverse_ (uncurry lxDefine) (zip ps args) 
-      lxStmts ss) (length ps) =<< get @LxEnv
+    rec fun <- LvFun . LoxFun n (LoxFunction $ \args -> do 
+                  traverse_ (uncurry lxDefine) (zip ps args) 
+                  lxStmts ss
+                  pure ()) (length ps) <$> lxAssign n fun
+    pure ()
   LxClassDecl name methods -> 
     lxDefine name (LvClass (LoxClass name methods))    
-  LxReturn ret -> throw @ReturnState =<< (,) <$> get @LxEnv <*> lxEvaluate ret
-lxWhile :: Members [State LxEnv, Fail, Error ReturnState, Haskeline, Embed IO] r => LxExpr -> LxStmt -> Sem r ()
+  LxReturn ret -> do 
+    env <- get
+    throw @ReturnState =<< (,) env <$> lxEvaluate ret
+lxWhile :: Members LxMembers r => LxExpr -> LxStmt -> Sem r ()
 lxWhile e d = 
     bool (pure()) (lxStmt d *> lxWhile e d) . lxTruthy =<< lxEvaluate e
 lxDefine :: Member (State LxEnv) r => T.Text -> LoxValue -> Sem r ()
@@ -62,12 +69,20 @@ getPure s@(LxEnv m enclosing _) k =
         Nothing -> Nothing
         Just e ->  (,) s . snd <$> getPure e k
   
-lxAssign :: Members [Fail, State LxEnv] r => T.Text -> LoxValue -> Sem r ()
-lxAssign k v = do 
-  env <- get 
+lxAssign :: Members [Fail, State LxEnv] r => T.Text -> LoxValue -> Sem r LxEnv
+lxAssign k v = do
+  lxAssign_ k v
+  get @LxEnv
+lxAssign_ :: Members [Fail, State LxEnv] r => T.Text -> LoxValue -> Sem r ()
+lxAssign_ k v = do 
+  env <- get
+  put @LxEnv =<< lxAssignFail env k v
+lxAssignFail :: Member Fail r => LxEnv -> T.Text -> LoxValue -> Sem r LxEnv
+lxAssignFail env k v = 
   case assignPure env k v of 
-    Just newEnv -> put newEnv
+    Just newEnv -> pure newEnv
     Nothing -> fail . T.unpack $ "Undefined variable " <> k
+    
 assignPure :: LxEnv -> T.Text -> LoxValue -> Maybe LxEnv 
 assignPure env@(LxEnv m enc _) k v = 
   case HM.lookup k m of 
@@ -86,7 +101,7 @@ lxLeaveBlock = do
   case env of 
     LxEnv _ (Just e) _ -> put e
     _ -> fail "Can't leave top scope"
-lxEvaluate :: Members [State LxEnv, Fail, Error ReturnState, Haskeline, Embed IO] r  => LxExpr -> Sem r LoxValue
+lxEvaluate :: Members LxMembers r  => LxExpr -> Sem r LoxValue
 lxEvaluate (LxLit v) = pure $ parseLitToValue v
 
 lxEvaluate (LxGroup e) = lxEvaluate e
@@ -120,7 +135,7 @@ lxEvaluate (LxBinop le re t) = do
     _ -> lxEvalEquality l re t 
 lxEvaluate (LxCall callee args) = uncurry lxCall =<< (,) <$> lxEvaluate callee <*> traverse lxEvaluate args
 -- for things that don't short circut
-lxEvalEquality :: Members [Fail, State LxEnv, Error ReturnState, Haskeline, Embed IO] r => LoxValue -> LxExpr -> LxBinopKind -> Sem r LoxValue
+lxEvalEquality :: Members LxMembers r => LoxValue -> LxExpr -> LxBinopKind -> Sem r LoxValue
 lxEvalEquality l re t = do 
   r <- lxEvaluate re 
   case t of 
@@ -134,7 +149,7 @@ lxEvalEquality l re t = do
     _ -> 
       lxEvalNumeric l r t
 -- for things that need number
-lxEvalNumeric :: Members [Fail, State LxEnv, Haskeline, Embed IO] r => LoxValue -> LoxValue -> LxBinopKind -> Sem r LoxValue
+lxEvalNumeric :: Members [Fail, State LxEnv, Haskeline, Final IO] r => LoxValue -> LoxValue -> LxBinopKind -> Sem r LoxValue
 lxEvalNumeric l r t = do 
   ln <- lxToNum l
   rn <- lxToNum r
@@ -148,14 +163,23 @@ lxEvalNumeric l r t = do
     LxLessEq    -> pure $ LvBool   $ ln <= rn
     _           -> fail "bad eval"
      
-lxCall :: Members [Fail,State LxEnv, Error ReturnState, Haskeline, Embed IO] r => LoxValue -> [LoxValue] -> Sem r LoxValue
-lxCall (LvFun (LoxFun name (LoxFunction fun) n closure)) args = 
+lxCall :: Members LxMembers r => LoxValue -> [LoxValue] -> Sem r LoxValue
+lxCall daValue@(LvFun f@(LoxFun name (LoxFunction fun) n closure)) args = 
   if compareLength args n == EQ then do
     oldEnv <- get @LxEnv
-    catch @ReturnState (put closure *> fun args $> LvNil) (\(_, ret) -> put oldEnv $> ret)  
+    catch @ReturnState (put closure *> fun args $> LvNil) (\(newClosure, ret) -> do 
+      put oldEnv
+      lxAssign_ name (LvFun (f { lvClosure = newClosure}))  
+      pure ret)  
   else 
     -- showing length kinda defeats the point of the compareLength
-    fail $ "Expected " <> show n <> " args but got " <> show (length args) 
+    fail $ "Expected " <> show n <> " args but got " <> show (length args)
+lxCall (LvNativeFun name (LoxFunction fun) arity) args = 
+  if compareLength args arity == EQ then do 
+    oldEnv <- get @LxEnv
+    catch @ReturnState (fun args $> LvNil) (\(_, ret) -> put oldEnv $> ret)
+  else 
+    fail $ "Expected " <> show arity <> " args but got " <> show (length args)
 lxCall _ _ = fail "Only functions and classes can be called"
 lxToNum :: Member Fail r => LoxValue -> Sem r Float 
 lxToNum (LvNumber n) = pure n
@@ -164,6 +188,7 @@ lxToNum (LvBool True) = pure 1
 lxToNum (LvBool False) = pure 0
 lxToNum LvNil = fail "Null reference exception"
 lxToNum (LvFun{}) = fail "Can't convert function to number"
+lxToNum (LvNativeFun{})  = fail "Can't convert function to number"
 lxToNum (LvClass{}) = fail "Can't convert class to number"
 lxToNum (LvInstance{}) = fail "Can't convert class instance to number"
 lxTruthy :: LoxValue -> Bool

@@ -6,9 +6,10 @@ import Lox.Evaluate
 import Lox.Helpers
 import Data.Time.Clock.System
 import Data.HashMap.Strict qualified as HM
-import Polysemy.Embed (embed)
+import Polysemy.Final (embedFinal)
 clock :: LoxValue
-clock = LvFun (LoxFun "clock" (LoxFunction $ \_ -> lxRun . Left . pure . lxReturn . PLvNumber . fromIntegral . systemSeconds =<<  embed getSystemTime) 0 emptyEnv )
+clock = LvNativeFun "clock" (LoxFunction $ \_ -> lxStmt . lxReturn . PLvNumber . fromIntegral . systemSeconds =<<  embedFinal getSystemTime) 0
+
 
 lxReturn = LxReturn . LxLit
 envWithNative :: LxEnv

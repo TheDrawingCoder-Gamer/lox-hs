@@ -54,7 +54,6 @@ executable lox-hs
     , parser-combinators
     , polysemy
     , polysemy-plugin
-    , polysemy-zoo
     , repline
     , text
     , time

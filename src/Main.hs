@@ -20,10 +20,10 @@ import Control.Monad (void)
 import Lox.NativeFun
 import Data.Char (isSeparator)
 import Data.Bifunctor qualified as BFu
-
+import Polysemy.Fixpoint
 main :: IO ()
-main = void $ runM $ runError . PS.evalState (T.empty, False) . PS.evalState envWithNative $ haskelineToIO loop
-loop :: Sem [Haskeline, PS.State LxEnv, PS.State (T.Text, Bool), Error ReturnState, Embed IO] () 
+main = void $ runFinal $ fixpointToFinal . runError . PS.evalState (T.empty, False) . PS.evalState envWithNative $ haskelineToIOFinal loop
+loop :: Sem [Haskeline, PS.State LxEnv, PS.State (T.Text, Bool), Error ReturnState, Fixpoint, Final IO] () 
 loop = do 
   (txt, active) <- PS.get @(T.Text, Bool)
   line <- getInputLine $ if active then ">>: " else ">>> " 
@@ -64,7 +64,7 @@ loop = do
             "q" -> pure ()
             "quit" -> pure ()
             bad -> outputStrLn $ "Unknown command " <> bad
-interp :: Members [Haskeline, PS.State LxEnv, Error ReturnState, Embed IO] r => T.Text -> Sem r ()
+interp :: Members [Haskeline, PS.State LxEnv, Error ReturnState, Final IO, Fixpoint] r => T.Text -> Sem r ()
 interp inp = do 
   let expr' = parse parseLox "REPL" inp
   env <- PS.get

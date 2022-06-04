@@ -11,6 +11,7 @@ import Polysemy.State
 import Polysemy.Fail
 import Polysemy.Haskeline
 import Polysemy.Error
+import Polysemy.Fixpoint
 import Data.Hashable
 import GHC.Generics (Generic)
 type LoxParser = Parsec Text Text
@@ -22,7 +23,8 @@ data LoxValue
   | LvNumber Float
   | LvBool   Bool
   | LvNil
-  | LvFun   LoxFun
+  | LvFun   { lvFunction :: LoxFun}
+  | LvNativeFun { nativeName :: Text, nativeFun :: LoxFunction, nativeArity :: Int }
   | LvClass LoxClass
   | LvInstance LoxClass (HM.HashMap Text LoxValue)
   deriving Show
@@ -35,7 +37,11 @@ data ParseLxValue
 data LoxClass = LoxClass Text (HM.HashMap Text FunInfo)
   deriving (Show, Generic, Hashable)
 -- TODO: Come up with less stupid name
-data LoxFun = LoxFun Text LoxFunction Int LxEnv
+data LoxFun = LoxFun 
+  { lvName :: Text 
+  , lvFun :: LoxFunction 
+  , lvArity :: Int
+  , lvClosure :: LxEnv }
   deriving Show
 instance Eq LoxValue where 
   (LvString s) == (LvString t) = s == t 
@@ -56,6 +62,7 @@ prettyLoxValue LvNil         = "nil"
 prettyLoxValue (LvFun (LoxFun name _ _ _)) = T.unpack $ "<fn " <> name <> ">"
 prettyLoxValue (LvClass (LoxClass name _)) = T.unpack $ "class" <> name
 prettyLoxValue (LvInstance (LoxClass name _) _) = T.unpack $ name <> "instance"
+prettyLoxValue (LvNativeFun{nativeName=name}) = T.unpack $ "<fn " <> name <> ">"
 data LxBinopKind 
   = LxEquals
   | LxUnequal
@@ -107,9 +114,10 @@ data LxEnv = LxEnv
   , inFunction :: Bool }
   deriving Show
 type ReturnState = (LxEnv, LoxValue)
-newtype LoxFunction = LoxFunction (forall r. Members [State LxEnv, Fail, Error ReturnState, Haskeline, Embed IO] r => [LoxValue] -> Sem r ())
+newtype LoxFunction = LoxFunction (forall r. Members [State LxEnv, Fail, Fixpoint, Error ReturnState, Haskeline, Final IO] r => [LoxValue] -> Sem r ())
 instance Show LoxFunction where
   -- LOL
   show _ = "<fn>"
 instance Hashable LoxFunction where 
   hashWithSalt _ _ = 0 -- LOL 
+type LxMembers = [Fail, State LxEnv, Error ReturnState, Fixpoint, Haskeline, Final IO]
