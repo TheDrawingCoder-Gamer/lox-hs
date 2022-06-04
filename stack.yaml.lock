@@ -3,7 +3,21 @@
 # For more information, please see the documentation at:
 #   https://docs.haskellstack.org/en/stable/lock_files
 
-packages: []
+packages:
+- completed:
+    hackage: polysemy-zoo-0.8.0.0@sha256:902bb663a6ae7151e548727dd91a8d642fc6ed0dcd7b312aac8d75e37013e638,3880
+    pantry-tree:
+      size: 2904
+      sha256: ebe78b1a302b65bfd60f1a18d203e3bee8f4ac0fa9411ca5fbcedeb5f2caf0fb
+  original:
+    hackage: polysemy-zoo-0.8.0.0@sha256:902bb663a6ae7151e548727dd91a8d642fc6ed0dcd7b312aac8d75e37013e638,3880
+- completed:
+    hackage: constraints-0.12@sha256:7edf1e72a92d0a6761da634f08be9123dfcc0dcec11c269cbf465a09721c3481,2322
+    pantry-tree:
+      size: 867
+      sha256: c3422b7121927dd912d2b2b40d12f8addd991b83933d9f1415dfac883ada0c46
+  original:
+    hackage: constraints-0.12@sha256:7edf1e72a92d0a6761da634f08be9123dfcc0dcec11c269cbf465a09721c3481,2322
 snapshots:
 - completed:
     size: 618506

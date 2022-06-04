@@ -41,7 +41,10 @@ packages:
 #   commit: e7b331f14bcffb8367cd58fbfc8b40ec7642100a
 #
 # extra-deps: []
+extra-deps: []
 
+  #  - polysemy-zoo-0.8.0.0@sha256:902bb663a6ae7151e548727dd91a8d642fc6ed0dcd7b312aac8d75e37013e638,3880
+  #- constraints-0.12@sha256:7edf1e72a92d0a6761da634f08be9123dfcc0dcec11c269cbf465a09721c3481,2322
 # Override default flag values for local packages and extra-deps
 # flags: {}
 

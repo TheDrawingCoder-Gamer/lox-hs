@@ -24,6 +24,7 @@ dependencies:
   - containers
   - time
   - parser-combinators
+  - hashable
 ghc-options: 
   - -fplugin=Polysemy.Plugin
 default-extensions:

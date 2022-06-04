@@ -43,7 +43,7 @@ loop = do
         Just ln' -> 
           let (cmd, rest) = BFu.second (dropWhile isSeparator) $ break isSeparator ln' in
           case cmd of 
-            "ast" -> outputStrLn (show (parse parseLox "REPL" (T.pack ln'))) *> loop
+            "ast" -> outputStrLn (show (parse parseLox "REPL" (T.pack rest))) *> loop
             "{"   -> do 
               if active then 
                 outputStrLn "Can't start multiline while in a multiline"

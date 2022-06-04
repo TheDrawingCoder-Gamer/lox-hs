@@ -48,11 +48,13 @@ executable lox-hs
       base >=4.7 && <5
     , containers
     , exceptions
+    , hashable
     , haskeline
     , megaparsec
     , parser-combinators
     , polysemy
     , polysemy-plugin
+    , polysemy-zoo
     , repline
     , text
     , time

@@ -9,6 +9,7 @@ import Data.Text qualified as T
 import Control.Monad.Combinators.Expr
 import Data.Char
 import Data.Set qualified as S
+import Data.HashMap.Strict qualified as HM
 import Data.Maybe (fromMaybe)
 import Control.Monad (when)
 parseLox :: LoxParser (Either [LxStmt] LxExpr)
@@ -17,9 +18,16 @@ parseLox = choice
   , parseLxExpr <&> Right]
 parseLxDecl :: LoxParser LxStmt
 parseLxDecl = choice 
-  [parseFunDecl FunNormal
+  [parseClassDecl
+  ,parseFunDecl FunNormal
   ,parseVarDecl
   ,parseLxStmt]
+parseClassDecl :: LoxParser LxStmt
+parseClassDecl = try $ do 
+  lxclass 
+  LxClassDecl 
+    <$> lxpprident 
+    <*> (HM.fromList . map (\(LxFunDecl (FunDecl name info)) -> (name, info)) <$> between lxlbrace lxrbrace (many (parseFunDecl FunMethod)))
 parseVarDecl :: LoxParser LxStmt
 parseVarDecl = try $ uncurry LxVar <$> do 
   lxvar
@@ -28,13 +36,17 @@ parseVarDecl = try $ uncurry LxVar <$> do
     lxassign
     (,) name . Just <$> parseLxExpr) <* lxsemicolon
 parseFunDecl :: FunKind -> LoxParser LxStmt
-parseFunDecl _ = try $ do 
+parseFunDecl FunNormal = try $ do 
   lxfun 
-  name <- lxident
+  LxFunDecl <$> parseFun
+parseFunDecl FunMethod = LxFunDecl <$> parseFun
+parseFun :: LoxParser FunDecl
+parseFun = try $ do 
+  name <- lxident 
   params <- parseParams
   when (length params >= 255) $ registerCustomFailure "Can't have more than 255 params"
   LxBlock ss <- parseBlock
-  pure $ LxFunDecl name params (ss ++ [LxReturn (LxLit LvNil)])
+  pure $ FunDecl name $ FunInfo params (ss ++ [LxReturn (LxLit PLvNil)])
 parseParams :: LoxParser [T.Text] 
 parseParams = try $ between lxlparen lxrparen $ sepBy lxident lxcomma
 parseLxStmt :: LoxParser LxStmt
@@ -75,9 +87,9 @@ parseForStmt = try $ do
   incrementer <- optional parseLxExpr
   lxrparen
   body <- parseLxStmt
-  let whileBody = LxBlock [body, LxExprStmt $ fromMaybe (LxLit LvNil) incrementer]
-      whileLoop = LxWhile (fromMaybe (LxLit (LvBool True)) condition) whileBody
-  pure $ LxBlock [fromMaybe (LxExprStmt (LxLit LvNil)) initializer, whileLoop] 
+  let whileBody = LxBlock [body, LxExprStmt $ fromMaybe (LxLit PLvNil) incrementer]
+      whileLoop = LxWhile (fromMaybe (LxLit (PLvBool True)) condition) whileBody
+  pure $ LxBlock [fromMaybe (LxExprStmt (LxLit PLvNil)) initializer, whileLoop] 
 parseReturnStmt :: LoxParser LxStmt
 parseReturnStmt = try $ do 
   lxreturn
@@ -126,52 +138,15 @@ lxinfixr m t = InfixR (m $> \a b -> LxBinop a b t)
 lxinfix m t = InfixN (m $> \a b -> LxBinop a b t)
 lxprefix m t = Prefix (m $> LxUnary False t)
 lxpostfix m t = Postfix (m $> LxUnary True t)
-{-
-parseEquality :: LoxParser LxExpr
-parseEquality = do 
-  lexpr <- parseComparison
-  option lexpr $ do 
-    daToken <- choice [lxequals $> LxEquals, lxnequal $> LxUnequal] 
-    rexpr <- parseEquality
-    pure $ LxBinop lexpr rexpr daToken
-
-parseComparison :: LoxParser LxExpr 
-parseComparison = do 
-  lexpr <- parseTerm 
-  option lexpr $ do 
-    daToken <- choice 
-      [ lxgreatereq $> LxGreaterEq
-      , lxlesseq $> LxLessEq
-      , lxless $> LxLess
-      , lxgreater $> LxGreater] 
-    rexpr <- parseComparison 
-    pure $ LxBinop lexpr rexpr daToken
-
-parseTerm :: LoxParser LxExpr
-parseTerm = do 
-  lexpr <- parseFactor 
-  option lexpr $ do 
-    daToken <- choice [lxplus $> LxPlus, lxminus $> LxMinus]
-    rexpr <- parseTerm 
-    pure $ LxBinop lexpr rexpr daToken
-
-parseFactor :: LoxParser LxExpr
-parseFactor = do 
-  lexpr <- parseUnary
-  option lexpr $ do 
-    daToken <- choice [lxstar $> LxTimes, lxslash $> LxDiv]
-    rexpr <- parseFactor 
-    pure $ LxBinop lexpr rexpr daToken
--}
 parsePrimary :: LoxParser LxExpr 
 parsePrimary = choice 
-  [ lxtrue $> LxLit (LvBool True)
-  , lxfalse $> LxLit (LvBool False) 
-  , lxnil $> LxLit LvNil
-  , LxLit . LvNumber <$> lxnumber
-  , LxLit . LvString <$> lxstring
+  [ lxtrue $> LxLit (PLvBool True)
+  , lxfalse $> LxLit (PLvBool False) 
+  , lxnil $> LxLit PLvNil
+  , LxLit . PLvNumber <$> lxnumber
+  , LxLit . PLvString <$> lxstring
   , LxGroup <$> between lxlparen lxrparen parseLxExpr
-  , LxIdent <$> lxident ]
+  , LxIdent <$> lxidentEither ]
 
 lexSpace :: LoxParser () 
 lexSpace = L.space MC.space1 (L.skipLineComment "//") (L.skipBlockCommentNested "/*" "*/")
@@ -194,10 +169,7 @@ lxstar      = symbol "*"
 lxslash     = symbol "/"
 lxnequal    = symbol "!="
 lxequals    = symbol "=="
-lxassign    = lexeme $ 
-  do 
-    single '='
-    notFollowedBy (single '=')
+lxassign    = lexeme $ notFollowedBy lxequals *> single '=' 
 lxbang      = symbol "!"
 lxgreatereq = symbol ">=" 
 lxgreater   = symbol ">"
@@ -221,9 +193,20 @@ lxthis      = symbol "this"
 lxtrue      = symbol "true"
 lxvar       = symbol "var"
 lxwhile     = symbol "while"
-lxident     :: LoxParser T.Text
-lxident      = notFollowedBy (choice [lxand, lxclass, lxelse, lxfalse, lxfun, lxfor, lxif, lxnil, lxor, lxprint, lxreturn, lxsuper, lxthis, lxtrue, lxvar, lxwhile]) *> (lexeme $ T.cons 
-              <$> satisfy (\c -> isAsciiUpper c || isAsciiLower c || c == '_')
-              <*> takeWhileP Nothing (\c -> isAscii c && isLetter c) :: LoxParser T.Text)
+lxidentGen       :: Bool -> LoxParser T.Text
+lxidentGen lower  = try (notReservedKeyword *> lexeme (T.cons 
+                      <$> satisfy (validIdentStarter lower)
+                      <*> takeWhileP Nothing validIdentTail))
+lxidentEither = lxident <|> lxpprident
+lxident = lxidentGen True
+lxpprident = lxidentGen False
+validIdentStarter :: Bool -> Char -> Bool
+validIdentStarter lower '_' = True
+validIdentStarter lower c   = isAscii c && isLetter c
+validIdentTail :: Char -> Bool
+validIdentTail '_' = True
+validIdentTail c = (isAscii c && isLetter c) || isDigit c
+notReservedKeyword :: LoxParser ()
+notReservedKeyword = notFollowedBy (choice [lxand, lxclass, lxelse, lxfalse, lxfun, lxfor, lxif, lxnil, lxor, lxprint, lxreturn, lxsuper, lxthis, lxtrue, lxvar, lxwhile])
 lxstring    = lexeme (between "\"" "\"" (takeWhileP Nothing (`notElem` ("\n\"" :: [Char]))))
 

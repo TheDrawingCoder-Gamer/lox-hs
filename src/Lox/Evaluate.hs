@@ -18,25 +18,26 @@ import Data.Maybe (maybe, fromMaybe)
 import Data.Bool (bool)
 lxRun :: Members [State LxEnv, Fail, Error ReturnState, Haskeline, Embed IO] r => Either [LxStmt] LxExpr -> Sem r ()
 lxRun = \case 
-    Left stmts -> traverse_ lxStmt stmts
+    Left stmts -> lxStmts stmts
     Right expr -> lxEvaluate expr >>= outputStrLn . prettyLoxValue
-  
+lxStmts :: Members [State LxEnv, Fail, Error ReturnState, Haskeline, Embed IO] r =>  [LxStmt] -> Sem r ()
+lxStmts = traverse_ lxStmt
 lxStmt :: Members [State LxEnv, Fail, Error ReturnState, Haskeline, Embed IO] r => LxStmt -> Sem r ()
 lxStmt = \case
   LxExprStmt e -> lxEvaluate e >> pure ()
   LxPrint e -> lxEvaluate e >>= outputStrLn . prettyLoxValue
   LxVar n (Just v) -> lxEvaluate v >>= lxDefine n
   LxVar n Nothing -> lxDefine n LvNil
-  LxBlock stmts -> lxEnterBlock *> (lxRun (Left stmts) <* lxLeaveBlock)
+  LxBlock stmts -> lxEnterBlock *> (lxStmts stmts <* lxLeaveBlock)
   LxIf b i e -> bool (maybe (pure ()) lxStmt e) (lxStmt i) . lxTruthy =<< lxEvaluate b
   LxWhile b d -> lxWhile b d
-  LxFunDecl n ps ss -> do 
-    unfinishedFun <- LvFun (LoxFunction $ \args -> do 
-      traverse_ (uncurry lxDefine) (zip ps args)
-      lxRun (Left ss)) (length ps) <$> get @LxEnv
-    lxDefine n unfinishedFun
-     
-    
+  LxFunDecl (FunDecl n (FunInfo ps ss)) -> do
+    lxDefine n LvNil
+    lxAssign n <$> LvFun . LoxFun n (LoxFunction $ \args -> do 
+      traverse_ (uncurry lxDefine) (zip ps args) 
+      lxStmts ss) (length ps) =<< get @LxEnv
+  LxClassDecl name methods -> 
+    lxDefine name (LvClass (LoxClass name methods))    
   LxReturn ret -> throw @ReturnState =<< (,) <$> get @LxEnv <*> lxEvaluate ret
 lxWhile :: Members [State LxEnv, Fail, Error ReturnState, Haskeline, Embed IO] r => LxExpr -> LxStmt -> Sem r ()
 lxWhile e d = 
@@ -86,7 +87,7 @@ lxLeaveBlock = do
     LxEnv _ (Just e) _ -> put e
     _ -> fail "Can't leave top scope"
 lxEvaluate :: Members [State LxEnv, Fail, Error ReturnState, Haskeline, Embed IO] r  => LxExpr -> Sem r LoxValue
-lxEvaluate (LxLit v) = pure v
+lxEvaluate (LxLit v) = pure $ parseLitToValue v
 
 lxEvaluate (LxGroup e) = lxEvaluate e
 lxEvaluate (LxIdent k) = lxGet k
@@ -148,7 +149,7 @@ lxEvalNumeric l r t = do
     _           -> fail "bad eval"
      
 lxCall :: Members [Fail,State LxEnv, Error ReturnState, Haskeline, Embed IO] r => LoxValue -> [LoxValue] -> Sem r LoxValue
-lxCall (LvFun (LoxFunction fun) n closure) args = 
+lxCall (LvFun (LoxFun name (LoxFunction fun) n closure)) args = 
   if compareLength args n == EQ then do
     oldEnv <- get @LxEnv
     catch @ReturnState (put closure *> fun args $> LvNil) (\(_, ret) -> put oldEnv $> ret)  
@@ -163,6 +164,8 @@ lxToNum (LvBool True) = pure 1
 lxToNum (LvBool False) = pure 0
 lxToNum LvNil = fail "Null reference exception"
 lxToNum (LvFun{}) = fail "Can't convert function to number"
+lxToNum (LvClass{}) = fail "Can't convert class to number"
+lxToNum (LvInstance{}) = fail "Can't convert class instance to number"
 lxTruthy :: LoxValue -> Bool
 lxTruthy LvNil = False
 lxTruthy (LvBool b) = b

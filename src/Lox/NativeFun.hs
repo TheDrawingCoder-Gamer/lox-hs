@@ -8,9 +8,8 @@ import Data.Time.Clock.System
 import Data.HashMap.Strict qualified as HM
 import Polysemy.Embed (embed)
 clock :: LoxValue
-clock = LvFun (LoxFunction $ \_ -> lxRun . Left . pure . lxReturn . LvNumber . fromIntegral . systemSeconds =<<  embed getSystemTime) 0 emptyEnv 
+clock = LvFun (LoxFun "clock" (LoxFunction $ \_ -> lxRun . Left . pure . lxReturn . PLvNumber . fromIntegral . systemSeconds =<<  embed getSystemTime) 0 emptyEnv )
 
 lxReturn = LxReturn . LxLit
-
 envWithNative :: LxEnv
 envWithNative = emptyEnv { variables = HM.fromList [("clock", clock)] }
