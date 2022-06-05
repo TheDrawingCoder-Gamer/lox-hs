@@ -46,7 +46,7 @@ parseFun = try $ do
   params <- parseParams
   when (length params >= 255) $ registerCustomFailure "Can't have more than 255 params"
   LxBlock ss <- parseBlock
-  pure $ FunDecl name $ FunInfo params (ss ++ [LxReturn (LxLit PLvNil)])
+  pure $ FunDecl name $ FunInfo params (ss ++ [LxReturn Nothing])
 parseParams :: LoxParser [T.Text] 
 parseParams = try $ between lxlparen lxrparen $ sepBy lxident lxcomma
 parseLxStmt :: LoxParser LxStmt
@@ -93,7 +93,8 @@ parseForStmt = try $ do
 parseReturnStmt :: LoxParser LxStmt
 parseReturnStmt = try $ do 
   lxreturn
-  LxReturn <$> parseLxExpr <* lxsemicolon
+  option (LxReturn Nothing) (LxReturn . Just <$> parseLxExpr) <* lxsemicolon
+
 
 parseLxExpr :: LoxParser LxExpr
 parseLxExpr = parseLxCall <|> parseOpExpr
@@ -128,10 +129,10 @@ parseOpExpr = try $ do
     , [lxinfixl lxand       LxAnd]
     , [lxinfixl lxor        LxOr]
     , [lxinfixr lxassign    LxAssign]]
-  (case expr of 
-    LxBinop (LxIdent _) _ LxAssign -> pure ()
-    LxBinop _ _ LxAssign -> registerCustomFailure "Expected identifier on left side of assignment"
-    _ -> pure ()) $>  expr
+  case expr of 
+    LxBinop (LxIdent infos ) rexpr LxAssign -> pure (LxEAssign infos rexpr)
+    LxBinop _ _ LxAssign -> registerCustomFailure "Expected identifier on left side of assignment" $> expr
+    _ -> pure expr
 registerCustomFailure = registerFancyFailure . S.singleton . ErrorCustom
 lxinfixl m t = InfixL (m $> \a b -> LxBinop a b t)
 lxinfixr m t = InfixR (m $> \a b -> LxBinop a b t)
@@ -146,8 +147,7 @@ parsePrimary = choice
   , LxLit . PLvNumber <$> lxnumber
   , LxLit . PLvString <$> lxstring
   , LxGroup <$> between lxlparen lxrparen parseLxExpr
-  , LxIdent <$> lxidentEither ]
-
+  , LxIdent_ <$> lxidentEither]
 lexSpace :: LoxParser () 
 lexSpace = L.space MC.space1 (L.skipLineComment "//") (L.skipBlockCommentNested "/*" "*/")
 

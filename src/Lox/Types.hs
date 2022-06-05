@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveGeneric, DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric, DeriveAnyClass, PatternSynonyms #-}
 module Lox.Types where 
 
 import Text.Megaparsec hiding (State)
@@ -7,7 +7,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.HashMap.Strict qualified as HM
 import Polysemy
-import Polysemy.State
+import Polysemy.StackState
 import Polysemy.Fail
 import Polysemy.Haskeline
 import Polysemy.Error
@@ -23,11 +23,12 @@ data LoxValue
   | LvNumber Float
   | LvBool   Bool
   | LvNil
-  | LvFun   { lvFunction :: LoxFun}
-  | LvNativeFun { nativeName :: Text, nativeFun :: LoxFunction, nativeArity :: Int }
+  | LvFun   { lvFunction :: FunDecl, lvClosure :: [LxEnv] }
+  -- preferably, I would use an actual haskell function for native functions
+  | LvNativeFun {nativeFunction :: LoxNativeFun}
   | LvClass LoxClass
   | LvInstance LoxClass (HM.HashMap Text LoxValue)
-  deriving Show
+
 data ParseLxValue 
   = PLvString Text
   | PLvNumber Float
@@ -36,13 +37,10 @@ data ParseLxValue
   deriving (Show, Generic, Hashable)
 data LoxClass = LoxClass Text (HM.HashMap Text FunInfo)
   deriving (Show, Generic, Hashable)
--- TODO: Come up with less stupid name
-data LoxFun = LoxFun 
+data LoxNativeFun = LoxNativeFun 
   { lvName :: Text 
-  , lvFun :: LoxFunction 
-  , lvArity :: Int
-  , lvClosure :: LxEnv }
-  deriving Show
+  , lvFun :: LoxFunction
+  , lvArity :: Int }
 instance Eq LoxValue where 
   (LvString s) == (LvString t) = s == t 
   (LvNumber x) == (LvNumber y) = x == y
@@ -59,10 +57,10 @@ prettyLoxValue (LvNumber n) = show n
 prettyLoxValue (LvBool True) = "true"
 prettyLoxValue (LvBool False) = "false"
 prettyLoxValue LvNil         = "nil"
-prettyLoxValue (LvFun (LoxFun name _ _ _)) = T.unpack $ "<fn " <> name <> ">"
+prettyLoxValue (LvFun (FunDecl' name _ _) _) = T.unpack $ "<fn " <> name <> ">"
 prettyLoxValue (LvClass (LoxClass name _)) = T.unpack $ "class" <> name
 prettyLoxValue (LvInstance (LoxClass name _) _) = T.unpack $ name <> "instance"
-prettyLoxValue (LvNativeFun{nativeName=name}) = T.unpack $ "<fn " <> name <> ">"
+prettyLoxValue (LvNativeFun (LoxNativeFun{lvName=name})) = T.unpack $ "<fn " <> name <> ">"
 data LxBinopKind 
   = LxEquals
   | LxUnequal
@@ -82,14 +80,19 @@ data LxUnopKind
   = LxNot
   | LxNegate
   deriving (Eq, Show, Generic, Hashable)
-data LxExpr 
+data LxExpr
   = LxBinop LxExpr LxExpr LxBinopKind
   | LxGroup LxExpr
   | LxLit   ParseLxValue
-  | LxIdent Text
+  | LxIdent IdentInfo 
+  | LxEAssign IdentInfo LxExpr
   | LxUnary Bool LxUnopKind LxExpr
   | LxCall  LxExpr [LxExpr]
   deriving (Show, Generic,  Hashable)
+data IdentInfo = IdentInfo 
+  { identName :: Text
+  , identDepth :: Maybe Int}
+  deriving (Show, Generic, Hashable)
 data LxStmt
   = LxExprStmt LxExpr
   | LxPrint    LxExpr
@@ -99,25 +102,30 @@ data LxStmt
   | LxWhile    LxExpr LxStmt
   | LxFunDecl  FunDecl
   | LxClassDecl Text (HM.HashMap Text FunInfo)
-  | LxReturn   LxExpr
+  | LxReturn   (Maybe LxExpr)
   deriving (Show, Generic, Hashable) 
 data FunDecl = FunDecl Text FunInfo
   deriving (Show, Generic, Hashable)
 data FunInfo = FunInfo [Text] [LxStmt]
   deriving (Show, Generic, Hashable)
+data ResLoc 
+  = LocNormal
+  | LocFuntion
 data FunKind 
   = FunNormal
   | FunMethod
-data LxEnv = LxEnv 
-  { variables :: HM.HashMap Text LoxValue 
-  , enclosing :: Maybe LxEnv
-  , inFunction :: Bool }
-  deriving Show
-type ReturnState = (LxEnv, LoxValue)
-newtype LoxFunction = LoxFunction (forall r. Members [State LxEnv, Fail, Fixpoint, Error ReturnState, Haskeline, Final IO] r => [LoxValue] -> Sem r ())
-instance Show LoxFunction where
-  -- LOL
-  show _ = "<fn>"
-instance Hashable LoxFunction where 
-  hashWithSalt _ _ = 0 -- LOL 
-type LxMembers = [Fail, State LxEnv, Error ReturnState, Fixpoint, Haskeline, Final IO]
+newtype LxEnv = LxEnv 
+  { variables :: HM.HashMap Text LoxValue }
+type ReturnState = ([LxEnv], LoxValue)
+newtype LoxFunction = LoxFunction (forall r. Members LxMembers r => [LoxValue] -> Sem r ())
+type LxMembers = [Fail, StackState LxEnv, Error ReturnState, Fixpoint, Haskeline, Final IO]
+{-# COMPLETE FunDecl' #-}
+{-# COMPLETE IdentInfo_ #-}
+{-# COMPLETE LxIdent_, LxBinop, LxGroup, LxLit, LxEAssign, LxUnary, LxCall #-}
+{-# COMPLETE LxIdent', LxBinop, LxGroup, LxLit, LxEAssign, LxUnary, LxCall #-}
+pattern LxFunDecl' name args stmts = LxFunDecl (FunDecl' name args stmts)
+pattern FunDecl' name args stmts = FunDecl name (FunInfo args stmts)
+pattern IdentInfo_ name    <- IdentInfo name _ where
+  IdentInfo_ name = IdentInfo name Nothing
+pattern LxIdent_ name = LxIdent (IdentInfo_ name)
+pattern LxIdent' name scope = LxIdent (IdentInfo name scope)

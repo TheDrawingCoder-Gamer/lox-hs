@@ -1,11 +1,12 @@
 {-# LANGUAGE RecursiveDo #-}
 module Lox.Evaluate (lxRun, lxEvaluate, lxStmts, lxStmt) where 
 
-import Lox.Types 
+import Lox.Types
+import Lox.Resolver qualified as R
 import Data.Text qualified as T
 import Polysemy
 import Data.Time.Clock.System
-import Polysemy.State
+import Polysemy.StackState
 import Data.HashMap.Strict qualified as HM
 import Polysemy.Fail
 import Polysemy.Haskeline
@@ -14,11 +15,13 @@ import Polysemy.Fixpoint
 import Prelude 
 import Data.Bifunctor qualified as BFu
 import Data.Functor (($>))
-import Control.Monad ((=<<), void)
+import Control.Monad ((=<<), void, join)
+import Control.Monad.Fix (mfix)
 import Data.Foldable (traverse_)
 import Data.Maybe (maybe, fromMaybe)
 import Data.Bool (bool)
-import Debug.Trace (traceShowId)
+import Data.Coerce (coerce)
+import Lox.Helpers
 lxRun :: Members LxMembers r => Either [LxStmt] LxExpr -> Sem r ()
 lxRun = \case 
     Left stmts -> lxStmts stmts
@@ -34,78 +37,88 @@ lxStmt = \case
   LxBlock stmts -> lxEnterBlock *> (lxStmts stmts <* lxLeaveBlock)
   LxIf b i e -> bool (maybe (pure ()) lxStmt e) (lxStmt i) . lxTruthy =<< lxEvaluate b
   LxWhile b d -> lxWhile b d
-  LxFunDecl (FunDecl n (FunInfo ps ss)) -> do
+  LxFunDecl decl@(FunDecl n (FunInfo ps ss)) -> mdo
     lxDefine n LvNil
-    rec fun <- LvFun . LoxFun n (LoxFunction $ \args -> do 
-                  traverse_ (uncurry lxDefine) (zip ps args) 
-                  lxStmts ss
-                  pure ()) (length ps) <$> lxAssign n fun
-    pure ()
+    fun <- LvFun decl <$> (lxAssignAt 0 n fun *> get)
+    lxDefine n fun
+
   LxClassDecl name methods -> 
     lxDefine name (LvClass (LoxClass name methods))    
   LxReturn ret -> do 
     env <- get
-    throw @ReturnState =<< (,) env <$> lxEvaluate ret
+    throw @ReturnState =<< (,) env <$> maybe (pure LvNil) lxEvaluate ret
 lxWhile :: Members LxMembers r => LxExpr -> LxStmt -> Sem r ()
 lxWhile e d = 
     bool (pure()) (lxStmt d *> lxWhile e d) . lxTruthy =<< lxEvaluate e
-lxDefine :: Member (State LxEnv) r => T.Text -> LoxValue -> Sem r ()
+lxDefine :: Member (StackState LxEnv) r => T.Text -> LoxValue -> Sem r ()
 lxDefine k v = do 
-  e@(LxEnv m _ _) <- get
-  put @LxEnv $ e { variables = HM.insert k v m } 
+  poke (\e@(LxEnv m) -> e {variables = HM.insert k v m })
 
-lxGet    :: Members [Fail, State LxEnv] r => T.Text -> Sem r LoxValue
-lxGet k = do
+lxGetGlobal :: Members [Fail, StackState LxEnv] r => T.Text -> Sem r LoxValue
+lxGetGlobal k = do
   env <- get
   case getPure env k of 
-    Just (newEnv, value) -> put newEnv $> value
+    Just value -> pure value
     Nothing -> fail . T.unpack $ "Undefined variable " <> k
-getPure :: LxEnv -> T.Text -> Maybe (LxEnv, LoxValue)
-getPure s@(LxEnv m enclosing _) k = 
+getPure :: [LxEnv] -> T.Text -> Maybe LoxValue
+getPure (e@(LxEnv m):es) k = 
   case HM.lookup k m of 
-    Just v -> Just (s, v)
+    Just v -> pure v
     Nothing -> 
-      case enclosing of 
-        Nothing -> Nothing
-        Just e ->  (,) s . snd <$> getPure e k
-  
-lxAssign :: Members [Fail, State LxEnv] r => T.Text -> LoxValue -> Sem r LxEnv
-lxAssign k v = do
-  lxAssign_ k v
+      getPure es k
+getPure [] _ = Nothing
+lxGetAt :: Members [Fail, StackState LxEnv] r => Int -> T.Text -> Sem r LoxValue 
+lxGetAt dist k = do 
+  (LxEnv m) <- ancestorError dist ("LxAnayl - " ++ T.unpack k)
+  case HM.lookup k m of 
+    Nothing -> fail "Internal error in lxGetAt: Var not found"
+    Just v -> pure v
+ancestorFail :: Members [Fail, StackState LxEnv] r => Int -> Sem r LxEnv
+ancestorFail dist = ancestorError dist "Getting lexical analyser failed"
+ancestorError :: Members [Fail, StackState LxEnv] r => Int -> String -> Sem r LxEnv
+ancestorError dist err = do
+  s <- peekN dist
+  case s of 
+    Nothing -> fail err
+    Just v  -> pure v
+ancestorWith :: Members [Fail, StackState LxEnv] r => Int -> (LxEnv -> LxEnv) -> Sem r ()
+ancestorWith dist f = ancestorWithError dist f "Assigning lexical anayliser failed"
+ancestorWithError :: Members [Fail, StackState LxEnv] r => Int -> (LxEnv -> LxEnv) -> String -> Sem r ()
+ancestorWithError dist f err = do 
+  s <- peekN dist
+  case s of 
+    Nothing -> fail err
+    _ -> pokeN dist f
+lxAssignGlobal :: Members [Fail, StackState LxEnv] r => T.Text -> LoxValue -> Sem r [LxEnv]
+lxAssignGlobal k v = do
+  lxAssignGlobal_ k v
   get @LxEnv
-lxAssign_ :: Members [Fail, State LxEnv] r => T.Text -> LoxValue -> Sem r ()
-lxAssign_ k v = do 
+lxAssignGlobal_ :: Members [Fail, StackState LxEnv] r => T.Text -> LoxValue -> Sem r ()
+lxAssignGlobal_ k v = do 
   env <- get
   put @LxEnv =<< lxAssignFail env k v
-lxAssignFail :: Member Fail r => LxEnv -> T.Text -> LoxValue -> Sem r LxEnv
-lxAssignFail env k v = 
-  case assignPure env k v of 
-    Just newEnv -> pure newEnv
-    Nothing -> fail . T.unpack $ "Undefined variable " <> k
-    
-assignPure :: LxEnv -> T.Text -> LoxValue -> Maybe LxEnv 
-assignPure env@(LxEnv m enc _) k v = 
-  case HM.lookup k m of 
-    Nothing -> 
-      case enc of 
-        Nothing -> Nothing
-        Just e -> case assignPure e k v of 
-          Just newEnv -> Just $ env { enclosing = Just newEnv} 
-          _ -> Nothing
-    Just _ -> Just env { variables = HM.insert k v m }
-lxEnterBlock :: Member (State LxEnv) r => Sem r () 
-lxEnterBlock = modify $ LxEnv HM.empty <$> Just <*> inFunction 
-lxLeaveBlock :: Members [Fail, State LxEnv] r => Sem r ()
+lxAssignAt :: Members [Fail, StackState LxEnv] r => Int -> T.Text -> LoxValue -> Sem r () 
+lxAssignAt dist k v = ancestorWithError dist (coerce (HM.insert k v)) ("LxAnayl - " ++ T.unpack k)
+lxAssignFail :: Member Fail r => [LxEnv] -> T.Text -> LoxValue -> Sem r [LxEnv]
+lxAssignFail envs k v =
+  let e = unsnoc envs in 
+    case e of 
+      Nothing -> fail "No scopes"
+      Just (xs, LxEnv x) -> pure $ snoc xs (LxEnv (HM.insert k v x))
+lxEnterBlock :: Member (StackState LxEnv) r => Sem r () 
+lxEnterBlock = push $ LxEnv HM.empty 
+lxLeaveBlock :: Members [Fail, StackState LxEnv] r => Sem r ()
 lxLeaveBlock = do 
-  env <- get 
-  case env of 
-    LxEnv _ (Just e) _ -> put e
-    _ -> fail "Can't leave top scope"
+  void pop
+    
 lxEvaluate :: Members LxMembers r  => LxExpr -> Sem r LoxValue
 lxEvaluate (LxLit v) = pure $ parseLitToValue v
 
 lxEvaluate (LxGroup e) = lxEvaluate e
-lxEvaluate (LxIdent k) = lxGet k
+lxEvaluate (LxIdent' k d) = 
+  case d of 
+    Nothing -> lxGetGlobal k
+    Just dist -> lxGetAt dist k
 lxEvaluate (LxUnary _ t e) = do
   r <- lxEvaluate e
   case t of 
@@ -113,11 +126,13 @@ lxEvaluate (LxUnary _ t e) = do
         LvNumber . negate <$> lxToNum r
       LxNot    ->
         pure $ LvBool (not (lxTruthy r))
-lxEvaluate (LxBinop (LxIdent n) re LxAssign) = do
-  env <- get @LxEnv
-  r <- lxEvaluate re
-  lxAssign n r
-  pure r
+lxEvaluate (LxBinop (LxIdent n) re LxAssign) = fail "unreachable"
+lxEvaluate (LxEAssign (IdentInfo name depth) expr) = do 
+  e <- lxEvaluate expr
+  case depth of 
+    Nothing -> lxAssignGlobal_ name e 
+    Just d  -> lxAssignAt d name e
+  pure e
 
 lxEvaluate (LxBinop le re t) = do 
   l <- lxEvaluate le
@@ -149,7 +164,7 @@ lxEvalEquality l re t = do
     _ -> 
       lxEvalNumeric l r t
 -- for things that need number
-lxEvalNumeric :: Members [Fail, State LxEnv, Haskeline, Final IO] r => LoxValue -> LoxValue -> LxBinopKind -> Sem r LoxValue
+lxEvalNumeric :: Members LxMembers r => LoxValue -> LoxValue -> LxBinopKind -> Sem r LoxValue
 lxEvalNumeric l r t = do 
   ln <- lxToNum l
   rn <- lxToNum r
@@ -164,23 +179,28 @@ lxEvalNumeric l r t = do
     _           -> fail "bad eval"
      
 lxCall :: Members LxMembers r => LoxValue -> [LoxValue] -> Sem r LoxValue
-lxCall daValue@(LvFun f@(LoxFun name (LoxFunction fun) n closure)) args = 
-  if compareLength args n == EQ then do
+lxCall daValue@(LvFun f@(FunDecl' name ps ss ) closure) args = 
+  if compareLengthLs args ps == EQ then do
     oldEnv <- get @LxEnv
-    catch @ReturnState (put closure *> fun args $> LvNil) (\(newClosure, ret) -> do 
+    catch @ReturnState (put closure *> runFunDecl args ps ss $> LvNil) (\(_, ret) -> do 
       put oldEnv
-      lxAssign_ name (LvFun (f { lvClosure = newClosure}))  
       pure ret)  
   else 
     -- showing length kinda defeats the point of the compareLength
-    fail $ "Expected " <> show n <> " args but got " <> show (length args)
-lxCall (LvNativeFun name (LoxFunction fun) arity) args = 
+    fail $ "Expected " <> show (length ps) <> " args but got " <> show (length args)
+lxCall (LvNativeFun (LoxNativeFun name (LoxFunction fun) arity)) args = 
   if compareLength args arity == EQ then do 
     oldEnv <- get @LxEnv
     catch @ReturnState (fun args $> LvNil) (\(_, ret) -> put oldEnv $> ret)
   else 
     fail $ "Expected " <> show arity <> " args but got " <> show (length args)
 lxCall _ _ = fail "Only functions and classes can be called"
+runFunDecl :: Members LxMembers r => [LoxValue] -> [T.Text] -> [LxStmt] -> Sem r ()
+runFunDecl args ps ss = do 
+  traverse_ (uncurry lxDefine) (zip ps args)
+  lxStmts ss
+  pure ()
+   
 lxToNum :: Member Fail r => LoxValue -> Sem r Float 
 lxToNum (LvNumber n) = pure n
 lxToNum (LvString s) = pure . read $ T.unpack s
@@ -195,9 +215,12 @@ lxTruthy :: LoxValue -> Bool
 lxTruthy LvNil = False
 lxTruthy (LvBool b) = b
 lxTruthy _ = True
-
+compareLengthLs :: [a] -> [b] -> Ordering
+compareLengthLs xs ys = compare (void xs) (void ys)
 compareLength :: (Ord b, Num b, Foldable f) => f a -> b -> Ordering
 compareLength = foldr (\_ acc n -> if n > 0 then acc (n - 1) else GT) (compare 0)
 -- unlike stinky java haskell is smart
 lxEqual :: LoxValue -> LoxValue -> Bool 
 lxEqual = (==)
+
+

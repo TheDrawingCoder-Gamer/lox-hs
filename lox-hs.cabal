@@ -24,8 +24,10 @@ executable lox-hs
       Lox.Helpers
       Lox.NativeFun
       Lox.Parser
+      Lox.Resolver
       Lox.Types
       Polysemy.Haskeline
+      Polysemy.StackState
       Paths_lox_hs
   hs-source-dirs:
       src

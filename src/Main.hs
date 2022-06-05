@@ -4,6 +4,7 @@ import Lox.Parser
 import Lox.Evaluate
 import Lox.Types
 import Lox.Helpers
+import Lox.Resolver qualified as R
 import Text.Megaparsec
 import Data.Either (fromRight)
 import Control.Monad.IO.Class (liftIO)
@@ -12,6 +13,7 @@ import Polysemy.Haskeline
 import Polysemy
 import Polysemy.Embed
 import Polysemy.State qualified as PS
+import Polysemy.StackState qualified as PSS
 import Polysemy.Fail
 import Polysemy.Error
 import Data.HashMap.Strict qualified as HM
@@ -20,10 +22,11 @@ import Control.Monad (void)
 import Lox.NativeFun
 import Data.Char (isSeparator)
 import Data.Bifunctor qualified as BFu
+import Data.Bitraversable qualified as BFt
 import Polysemy.Fixpoint
 main :: IO ()
-main = void $ runFinal $ fixpointToFinal . runError . PS.evalState (T.empty, False) . PS.evalState envWithNative $ haskelineToIOFinal loop
-loop :: Sem [Haskeline, PS.State LxEnv, PS.State (T.Text, Bool), Error ReturnState, Fixpoint, Final IO] () 
+main = void $ runFinal $ fixpointToFinal . runError . PS.evalState (T.empty, False) . PS.evalState [envWithNative] . PSS.stackStateToState $ haskelineToIOFinal loop
+loop :: Sem [Haskeline, PSS.StackState LxEnv, PS.State (T.Text, Bool), Error ReturnState, Fixpoint, Final IO] () 
 loop = do 
   (txt, active) <- PS.get @(T.Text, Bool)
   line <- getInputLine $ if active then ">>: " else ">>> " 
@@ -64,19 +67,29 @@ loop = do
             "q" -> pure ()
             "quit" -> pure ()
             bad -> outputStrLn $ "Unknown command " <> bad
-interp :: Members [Haskeline, PS.State LxEnv, Error ReturnState, Final IO, Fixpoint] r => T.Text -> Sem r ()
+interp :: Members [Haskeline, PSS.StackState LxEnv, Error ReturnState, Final IO, Fixpoint] r => T.Text -> Sem r ()
 interp inp = do 
   let expr' = parse parseLox "REPL" inp
-  env <- PS.get
+  env <- PSS.get
   case expr' of 
     Left l -> 
       outputStrLn $ errorBundlePretty l
     Right expr -> do
-      daNewState <- runFail $ PS.execState env (lxRun expr)
-      case daNewState of 
-        Left a -> 
-          outputStrLn a
-        Right newEnv ->
-          PS.put newEnv
-          
-          
+      newAst <- BFt.bitraverse (runFail . PS.evalState [] . R.resolve) (runFail . PS.evalState [] . R.resolveExpr) expr 
+      case newAst of 
+        Left s -> 
+          case s of 
+            Left e -> outputStrLn e
+            Right ss -> do
+              res <- runFail (lxStmts ss)
+              case res of 
+                Left e -> outputStrLn e
+                Right e -> pure ()
+        Right s -> 
+          case s of 
+            Left e -> outputStrLn e
+            Right e -> do 
+              res <- runFail (lxEvaluate e) 
+              case res of 
+                Left e -> outputStrLn e
+                Right e -> outputStrLn (prettyLoxValue e)
