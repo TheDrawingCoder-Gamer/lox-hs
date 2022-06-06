@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveGeneric, DeriveAnyClass, PatternSynonyms #-}
+{-# LANGUAGE DeriveGeneric, DeriveAnyClass, PatternSynonyms, StandaloneDeriving, DerivingVia #-}
 module Lox.Types where 
 
 import Text.Megaparsec hiding (State)
@@ -8,7 +8,7 @@ import Data.Text qualified as T
 -- lazy because of closures
 import Data.HashMap.Lazy qualified as HM
 import Polysemy
-import Polysemy.StackState
+import Polysemy.State
 import Polysemy.Fail
 import Polysemy.Haskeline
 import Polysemy.Error
@@ -16,6 +16,8 @@ import Polysemy.Fixpoint
 import Data.Hashable
 import Polysemy.Trace (Trace)
 import GHC.Generics (Generic)
+import Data.IORef
+import Data.Unique
 type LoxParser = Parsec Text Text
 instance ShowErrorComponent Text where 
   showErrorComponent = T.unpack
@@ -25,20 +27,19 @@ data LoxValue
   | LvNumber Float
   | LvBool   Bool
   | LvNil
-  | LvFun   { lvFunction :: FunDecl, lvClosure :: [LxEnv] }
+  | LvFun   { lvFunction :: FunDecl, lvClosure :: IORef LxEnv }
   -- preferably, I would use an actual haskell function for native functions
   | LvNativeFun {nativeFunction :: LoxNativeFun}
   | LvClass LoxClass
-  | LvInstance LoxClass (HM.HashMap Text LoxValue)
+  | LvInstance LoxClass (HM.HashMap Text (IORef LoxValue))
 
 data ParseLxValue 
   = PLvString Text
   | PLvNumber Float
   | PLvBool   Bool
   | PLvNil
-  deriving (Show, Generic, Hashable)
+  deriving (Eq, Show, Generic, Hashable)
 data LoxClass = LoxClass Text (HM.HashMap Text FunInfo)
-  deriving (Show, Generic, Hashable)
 data LoxNativeFun = LoxNativeFun 
   { lvName :: Text 
   , lvFun :: NativeFunDecl
@@ -82,19 +83,23 @@ data LxUnopKind
   = LxNot
   | LxNegate
   deriving (Eq, Show, Generic, Hashable)
-data LxExpr
+data LxExpr = LxExpr 
+  { exprNode :: LxExprNode 
+  , exprUniq :: Unique 
+  , exprPos  :: SourcePos }
+  deriving (Eq, Generic, Hashable)
+data IdentInfo = IdentInfo
+  { identUniq :: Unique
+  , identPos  :: SourcePos }
+data LxExprNode
   = LxBinop LxExpr LxExpr LxBinopKind
   | LxGroup LxExpr
   | LxLit   ParseLxValue
-  | LxIdent IdentInfo 
-  | LxEAssign IdentInfo LxExpr
+  | LxIdent Text 
+  | LxEAssign LxExpr LxExpr
   | LxUnary Bool LxUnopKind LxExpr
   | LxCall  LxExpr [LxExpr]
-  deriving (Show, Generic,  Hashable)
-data IdentInfo = IdentInfo 
-  { identName :: Text
-  , identDepth :: Maybe Int}
-  deriving (Show, Generic, Hashable)
+  deriving (Eq, Generic, Hashable)
 data LxStmt
   = LxExprStmt LxExpr
   | LxPrint    LxExpr
@@ -105,29 +110,37 @@ data LxStmt
   | LxFunDecl  FunDecl
   | LxClassDecl Text (HM.HashMap Text FunInfo)
   | LxReturn   (Maybe LxExpr)
-  deriving (Show, Generic, Hashable) 
 data FunDecl = FunDecl Text FunInfo
-  deriving (Show, Generic, Hashable)
 data FunInfo = FunInfo [Text] [LxStmt]
-  deriving (Show, Generic, Hashable)
 data ResLoc 
   = LocNormal
   | LocFuntion
 data FunKind 
   = FunNormal
   | FunMethod
-newtype LxEnv = LxEnv 
-  { variables :: HM.HashMap Text LoxValue }
+data LxEnv = LxEnv 
+  { variables :: HM.HashMap Text (IORef LoxValue)
+  , enclosing :: Maybe (IORef LxEnv)}
 type ReturnState = ([LxEnv], LoxValue)
+data EvalState = EvalState
+  { evalEnv :: LxEnv
+  , evalLocals :: HM.HashMap LxExpr Int }
+--data EvalError 
+--  = EvalTypeError String
 type NativeFunDecl = forall r. Members LxMembers r => [LoxValue] -> Sem r LoxValue
-type LxMembers = [Fail, StackState LxEnv, Error ReturnState, Fixpoint, Trace, Final IO]
+type LxMembers = [Fail, State EvalState, Error ReturnState, Fixpoint, Trace, Final IO]
 {-# COMPLETE FunDecl' #-}
-{-# COMPLETE IdentInfo_ #-}
-{-# COMPLETE LxIdent_, LxBinop, LxGroup, LxLit, LxEAssign, LxUnary, LxCall #-}
-{-# COMPLETE LxIdent', LxBinop, LxGroup, LxLit, LxEAssign, LxUnary, LxCall #-}
 pattern LxFunDecl' name args stmts = LxFunDecl (FunDecl' name args stmts)
 pattern FunDecl' name args stmts = FunDecl name (FunInfo args stmts)
-pattern IdentInfo_ name    <- IdentInfo name _ where
-  IdentInfo_ name = IdentInfo name Nothing
-pattern LxIdent_ name = LxIdent (IdentInfo_ name)
-pattern LxIdent' name scope = LxIdent (IdentInfo name scope)
+
+newtype NoHash a = NoHash a
+instance Hashable (NoHash a) where 
+  hashWithSalt salt _ = 0
+-- I LOVE ORPHANS
+instance Hashable Pos where 
+  hashWithSalt salt p = 
+    let p' = unPos p in 
+      hashWithSalt salt p'
+
+deriving instance Hashable SourcePos
+

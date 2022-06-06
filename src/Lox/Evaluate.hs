@@ -1,4 +1,4 @@
-{-# LANGUAGE RecursiveDo #-}
+{-# LANGUAGE RecursiveDo, RecordWildCards #-}
 module Lox.Evaluate (lxRun, lxEvaluate, lxStmts, lxStmt) where 
 
 import Lox.Types
@@ -6,7 +6,7 @@ import Lox.Resolver qualified as R
 import Data.Text qualified as T
 import Polysemy
 import Data.Time.Clock.System
-import Polysemy.StackState
+import Polysemy.State
 import Data.HashMap.Lazy qualified as HM
 import Polysemy.Fail
 import Polysemy.Error
@@ -24,6 +24,7 @@ import Lox.Helpers
 import Polysemy.Trace
 import Debug.Trace (traceIO)
 import Data.List (intersperse)
+import Data.IORef
 lxRun :: Members LxMembers r => Either [LxStmt] LxExpr -> Sem r ()
 lxRun = \case 
     Left stmts -> lxStmts stmts
@@ -51,64 +52,66 @@ lxStmt = \case
 lxWhile :: Members LxMembers r => LxExpr -> LxStmt -> Sem r ()
 lxWhile e d = 
     bool (pure()) (lxStmt d *> lxWhile e d) . lxTruthy =<< lxEvaluate e
-lxDefine :: Member (StackState LxEnv) r => T.Text -> LoxValue -> Sem r ()
-lxDefine k v = do 
-  poke (\e@(LxEnv m) -> e {variables = HM.insert k v m })
-
-lxGetGlobal :: Members [Fail, StackState LxEnv] r => T.Text -> Sem r LoxValue
+lxDefine :: Members [State EvalState, Final IO] r => T.Text -> LoxValue -> Sem r ()
+lxDefine k v = do
+  st <- get
+  env@(LxEnv m _) <- gets evalEnv
+  newMap <- HM.insert k <$> embedFinal (newIORef v) <*> pure m
+  put $ st {evalEnv = env { variables = newMap } }
+lxGetGlobal :: Members [Fail, State EvalState] r => T.Text -> Sem r LoxValue
 lxGetGlobal k = do
   env <- get
   case getPure env k of 
     Just value -> pure value
     Nothing -> fail . T.unpack $ "Undefined variable " <> k
 getPure :: [LxEnv] -> T.Text -> Maybe LoxValue
-getPure (e@(LxEnv m):es) k = 
+getPure (e@(LxEnv m en):es) k = 
   case HM.lookup k m of 
     Just v -> pure v
     Nothing -> 
       getPure es k
 getPure [] _ = Nothing
-lxGetAt :: Members [Fail, StackState LxEnv] r => Int -> T.Text -> Sem r LoxValue 
+lxGetAt :: Members [Fail, State LxEnv] r => Int -> T.Text -> Sem r LoxValue 
 lxGetAt dist k = do 
-  (LxEnv m) <- ancestorError dist ("LxAnayl - " ++ T.unpack k)
+  (LxEnv m _) <- ancestorError dist ("LxAnayl - " ++ T.unpack k)
   case HM.lookup k m of 
     Nothing -> fail "Internal error in lxGetAt: Var not found"
     Just v -> pure v
-ancestorFail :: Members [Fail, StackState LxEnv] r => Int -> Sem r LxEnv
+ancestorFail :: Members [Fail, State EvalState] r => Int -> Sem r LxEnv
 ancestorFail dist = ancestorError dist "Getting lexical analyser failed"
-ancestorError :: Members [Fail, StackState LxEnv] r => Int -> String -> Sem r LxEnv
+ancestorError :: Members [Fail, State EvalState] r => Int -> String -> Sem r LxEnv
 ancestorError dist err = do
   s <- peekN dist
   case s of 
     Nothing -> fail err
     Just v  -> pure v
-ancestorWith :: Members [Fail, StackState LxEnv] r => Int -> (LxEnv -> LxEnv) -> Sem r ()
+ancestorWith :: Members [Fail, State EvalState] r => Int -> (LxEnv -> LxEnv) -> Sem r ()
 ancestorWith dist f = ancestorWithError dist f "Assigning lexical anayliser failed"
-ancestorWithError :: Members [Fail, StackState LxEnv] r => Int -> (LxEnv -> LxEnv) -> String -> Sem r ()
+ancestorWithError :: Members [Fail, State EvalState] r => Int -> (LxEnv -> LxEnv) -> String -> Sem r ()
 ancestorWithError dist f err = do 
   s <- peekN dist
   case s of 
     Nothing -> fail err
     _ -> pokeN dist f
-lxAssignGlobal :: Members [Fail, StackState LxEnv] r => T.Text -> LoxValue -> Sem r [LxEnv]
+lxAssignGlobal :: Members [Fail, State EvalState] r => T.Text -> LoxValue -> Sem r [LxEnv]
 lxAssignGlobal k v = do
   lxAssignGlobal_ k v
   get @LxEnv
-lxAssignGlobal_ :: Members [Fail, StackState LxEnv] r => T.Text -> LoxValue -> Sem r ()
+lxAssignGlobal_ :: Members [Fail, State EvalState] r => T.Text -> LoxValue -> Sem r ()
 lxAssignGlobal_ k v = do 
   env <- get
   put @LxEnv =<< lxAssignFail env k v
-lxAssignAt :: Members [Fail, StackState LxEnv] r => Int -> T.Text -> LoxValue -> Sem r () 
+lxAssignAt :: Members [Fail, State LxEnv] r => Int -> T.Text -> LoxValue -> Sem r () 
 lxAssignAt dist k v = ancestorWithError dist (coerce (HM.insert k v)) ("LxAnayl - " ++ T.unpack k)
 lxAssignFail :: Member Fail r => [LxEnv] -> T.Text -> LoxValue -> Sem r [LxEnv]
 lxAssignFail envs k v =
   let e = unsnoc envs in 
     case e of 
       Nothing -> fail "No scopes"
-      Just (xs, LxEnv x) -> pure $ snoc xs (LxEnv (HM.insert k v x))
-lxEnterBlock :: Member (StackState LxEnv) r => Sem r () 
+      Just (xs, e@(LxEnv{..})) -> pure $ snoc xs (LxEnv (HM.insert k v x))
+lxEnterBlock :: Member (State LxEnv) r => Sem r () 
 lxEnterBlock = push $ LxEnv HM.empty 
-lxLeaveBlock :: Members [Fail, StackState LxEnv] r => Sem r ()
+lxLeaveBlock :: Members [Fail, State LxEnv] r => Sem r ()
 lxLeaveBlock = do 
   void pop
     
@@ -116,7 +119,7 @@ lxEvaluate :: Members LxMembers r  => LxExpr -> Sem r LoxValue
 lxEvaluate (LxLit v) = pure $ parseLitToValue v
 
 lxEvaluate (LxGroup e) = lxEvaluate e
-lxEvaluate (LxIdent' k d) = 
+lxEvaluate (LxIdent k) = 
   case d of 
     Nothing -> lxGetGlobal k
     Just dist -> lxGetAt dist k
@@ -176,7 +179,7 @@ lxEvalNumeric l r t = do
     LxLess      -> pure $ LvBool   $ ln < rn
     LxLessEq    -> pure $ LvBool   $ ln <= rn
     _           -> fail "bad eval"
-lxAssign :: Members [Fail, StackState LxEnv] r => Maybe Int -> T.Text -> LoxValue -> Sem r () 
+lxAssign :: Members [Fail, State LxEnv] r => Maybe Int -> T.Text -> LoxValue -> Sem r () 
 lxAssign depth k v = 
   case depth of 
     Nothing -> lxAssignGlobal_ k v
@@ -236,3 +239,39 @@ getIdent :: LxExpr -> Maybe IdentInfo
 getIdent (LxIdent infos) = Just infos
 getIdent (LxCall callee _) = getIdent callee
 getIdent _ = Nothing
+
+peek :: Member (State EvalState) r => Sem r LxEnv
+peek = gets evalEnv
+poke :: Member (State EvalState) r => (LxEnv -> LxEnv) -> Sem r ()
+poke f = do 
+  st <- get
+  env <- peek
+  st { evalEnv = f env }
+pokeN :: Members [State EvalState, Final IO] r => (LxEnv -> LxEnv) -> Int -> Sem r ()  
+pokeN f n = do
+  st <- get
+  pokeNIO st n
+  where 
+    pokeNIO :: Members [State EvalState, Final IO] r => LxEnv -> Int -> Sem r ()
+    pokeNIO _ 0 = poke f
+    pokeNIO env@(LxEnv _ (Just en)) 1 =
+      modifyIORef f en 
+    pokeNIO env@(LxEnv _ (Just en)) n = do 
+      pokeNIO =<< embedFinal (readIORef en)
+    pokeNIO _ _ = pure()
+peekN :: Members [State EvalState, Final IO] r => Int -> Sem r (Maybe LxEnv)
+peekN 0 = peek
+peekN n = do 
+  env <- peek
+  peekN' env n
+
+  where 
+    peekN' :: Members [State EvalState, Final IO] r => LxEnv -> Int -> Sem r (Maybe LxEnv)
+    peekN' cur 0 = Just cur
+    peekN' (LxEnv _ (Just en)) n = do 
+      peekN' =<< embedFinal (readIORef en)
+    peekN' _ _ = Nothing
+    
+    
+      
+

@@ -43,7 +43,7 @@ resolveFunction (FunDecl' name args ss) = do
   endScope
   pure $ FunDecl' name args ss'
 resolveExpr :: ResolverMembers r => LxExpr -> Sem r LxExpr
-resolveExpr expr@(LxIdent infos@(IdentInfo_ name)) = do 
+resolveExpr expr@(LxExpr (LxIdent name) u p) = do 
   scope' <- currentScope
   case scope' of 
     Just scope -> 
@@ -51,47 +51,55 @@ resolveExpr expr@(LxIdent infos@(IdentInfo_ name)) = do
         Just False -> fail "Can't read local variable in its own initializer"
         _ -> pure ()
     _ -> pure ()
-  LxIdent <$> resolveLocal infos
-resolveExpr(LxEAssign ident@(IdentInfo_ name) expr) = do 
+  resolveLocal expr name
+  pure expr
+resolveExpr e@(LxExpr (LxEAssign ident@(LxExpr (LxIdent name) _ _) expr) u p) = do 
   expr' <- resolveExpr expr
-  LxEAssign <$> resolveLocal ident <*> pure expr'
-resolveExpr (LxBinop lexpr rexpr t) = do 
-  LxBinop <$> resolveExpr lexpr <*> resolveExpr rexpr <*> pure t
-resolveExpr (LxCall callee args) = do 
-  LxCall <$> resolveExpr callee <*> traverse resolveExpr args
-resolveExpr (LxGroup expr) = LxGroup <$> resolveExpr expr
-resolveExpr (LxLit lit) = pure $ LxLit lit
-resolveExpr (LxUnary pf t rexpr ) = LxUnary pf t <$>resolveExpr rexpr
-resolveLocal :: ResolverMembers r => IdentInfo -> Sem r IdentInfo
-resolveLocal e@(IdentInfo_ name) = do 
-  scopes <- get
-  pure $ resolveRec scopes 0 
+  resolveLocal ident name
+  pure $ e { exprNode = LxEAssign ident expr' }
+resolveExpr (LxExpr LxEAssign{} _ _) = fail "unreachable"
+resolveExpr (LxExpr (LxBinop lexpr rexpr t) u p) = 
+  (\x -> LxExpr x u p) <$> (LxBinop <$> resolveExpr lexpr <*> resolveExpr rexpr <*> pure t)
+resolveExpr (LxExpr (LxCall callee args) u p) = do 
+  (\x -> LxExpr x u p) <$> (LxCall <$> resolveExpr callee <*> traverse resolveExpr args)
+resolveExpr (LxExpr (LxGroup expr) u p) = LxExpr <$> (LxGroup <$> resolveExpr expr) <*> pure u <*> pure p
+resolveExpr e@(LxExpr (LxLit _) _ _) = pure e
+resolveExpr (LxExpr (LxUnary pf t rexpr ) u p) = LxExpr <$> (LxUnary pf t <$>resolveExpr rexpr) <*> pure u <*> pure p
+resolveLocal :: ResolverMembers r => LxExpr -> T.Text -> Sem r ()
+resolveLocal e@(LxExpr _ uniq srcpos) name = do 
+  scopes <- gets scopes
+  resolveRec scopes 0 
   where 
-    resolveRec :: [Scope] -> Int -> IdentInfo
+    resolveRec :: ResolverMembers r => [Scope] -> Int -> Sem r ()
     resolveRec (x:xs) i =
       case HM.lookup name x of 
         Nothing -> resolveRec xs (i + 1)
-        Just _  -> e { identDepth = Just i }
-    resolveRec _ _ = e
+        Just _  -> do
+            st <- get @ResolverState
+            locs <- gets locals
+            put $ st { locals = HM.insert e i locs }
+    resolveRec _ _ = pure()
       
       
       
       
 beginScope :: ResolverMembers r => Sem r ()
-beginScope = modify (HM.empty :)
+beginScope = modify (\e -> e { scopes = HM.empty : scopes e})
 
 endScope   :: ResolverMembers r => Sem r ()
-endScope   = modify emptyTail
+endScope   = modify (\e -> e { scopes = emptyTail (scopes e) } )
 
 withCurrentScope :: ResolverMembers r => (Scope -> Scope) -> Sem r ()
 withCurrentScope f = do 
-  scopes <- get
+  scopes <- gets scopes
   case uncons scopes of 
     Nothing -> pure ()
-    Just (scope, rest) -> put (f scope:rest)
+    Just (scope, rest) -> do 
+      st <- get 
+      put st { scopes = f scope:rest }
 currentScope :: ResolverMembers r => Sem r (Maybe Scope)
 currentScope = do
-  scopes <- get @[Scope]
+  scopes <- gets scopes
   pure $ case uncons scopes of 
     Nothing -> Nothing
     Just (scope, _) -> Just scope
@@ -103,4 +111,7 @@ define  k  = withCurrentScope (HM.insert k True)
 emptyTail [] = []
 emptyTail xs = tail xs
 type Scope = HM.HashMap T.Text Bool
-type ResolverMembers r = Members [State [Scope], Fail] r
+data ResolverState = ResolverState
+  { locals  :: HM.HashMap LxExpr Int 
+  , scopes :: [Scope]} 
+type ResolverMembers r = Members [State ResolverState, Fail] r

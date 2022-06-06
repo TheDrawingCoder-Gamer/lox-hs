@@ -11,7 +11,9 @@ import Data.Char
 import Data.Set qualified as S
 import Data.HashMap.Lazy qualified as HM
 import Data.Maybe (fromMaybe)
-import Control.Monad (when)
+import Control.Monad (when, (>=>))
+import Data.Unique
+import System.IO.Unsafe (unsafePerformIO)
 parseLox :: LoxParser (Either [LxStmt] LxExpr)
 parseLox = choice 
   [try (many parseLxDecl <* eof)  <&> Left
@@ -82,14 +84,17 @@ parseForStmt = try $ do
   lxfor 
   lxlparen
   initializer <- try (lxsemicolon $> Nothing) <|> try (Just <$> parseVarDecl) <|> (Just <$> parseExprStmt)
+  initPos <- getSourcePos
   condition <- optional parseLxExpr 
+  condPos <- getSourcePos
   lxsemicolon
   incrementer <- optional parseLxExpr
+  incrPos <- getSourcePos
   lxrparen
   body <- parseLxStmt
-  let whileBody = LxBlock [body, LxExprStmt $ fromMaybe (LxLit PLvNil) incrementer]
-      whileLoop = LxWhile (fromMaybe (LxLit (PLvBool True)) condition) whileBody
-  pure $ LxBlock [fromMaybe (LxExprStmt (LxLit PLvNil)) initializer, whileLoop] 
+  let whileBody = LxBlock [body, LxExprStmt $ fromMaybe (LxExpr (LxLit PLvNil) makeUnique incrPos) incrementer]
+      whileLoop = LxWhile (fromMaybe (LxExpr (LxLit (PLvBool True)) makeUnique condPos) condition) whileBody
+  pure $ LxBlock [fromMaybe (LxExprStmt (LxExpr (LxLit PLvNil) makeUnique condPos)) initializer, whileLoop] 
 parseReturnStmt :: LoxParser LxStmt
 parseReturnStmt = try $ do 
   lxreturn
@@ -101,12 +106,15 @@ parseLxExpr = parseLxCall <|> parseOpExpr
 parseLxCall :: LoxParser LxExpr
 parseLxCall = try $ do 
   daFunCall <- LxCall <$> parsePrimary <*> parseArgs
-  manyLxArgs daFunCall 
+  srcPos <- getSourcePos
+  let expr = LxExpr daFunCall makeUnique srcPos
+  manyLxArgs expr
     
 manyLxArgs :: LxExpr -> LoxParser LxExpr
 manyLxArgs e = do 
   option e $ do 
-    manyLxArgs . LxCall e =<< parseArgs
+    srcPos <- getSourcePos
+    manyLxArgs . (\args -> LxExpr (LxCall e args) makeUnique srcPos) =<< parseArgs
 parseArgs :: LoxParser [LxExpr]
 parseArgs = do 
   args <- between lxlparen lxrparen $ sepBy parseLxExpr lxcomma
@@ -130,24 +138,24 @@ parseOpExpr = try $ do
     , [lxinfixl lxor        LxOr]
     , [lxinfixr lxassign    LxAssign]]
   case expr of 
-    LxBinop (LxIdent infos ) rexpr LxAssign -> pure (LxEAssign infos rexpr)
-    LxBinop _ _ LxAssign -> registerCustomFailure "Expected identifier on left side of assignment" $> expr
+    LxExpr {exprNode = LxBinop lexpr@(LxExpr (LxIdent{}) _ _) rexpr LxAssign, exprPos = pos} -> pure (LxExpr (LxEAssign lexpr rexpr) makeUnique pos)
+    LxExpr {exprNode = LxBinop _ _ LxAssign } -> registerCustomFailure "Expected identifier on left side of assignment" $> expr
     _ -> pure expr
 registerCustomFailure = registerFancyFailure . S.singleton . ErrorCustom
-lxinfixl m t = InfixL (m $> \a b -> LxBinop a b t)
-lxinfixr m t = InfixR (m $> \a b -> LxBinop a b t)
-lxinfix m t = InfixN (m $> \a b -> LxBinop a b t)
-lxprefix m t = Prefix (m $> LxUnary False t)
-lxpostfix m t = Postfix (m $> LxUnary True t)
+lxinfixl m t = InfixL (m $> \a@(LxExpr _ _ pos) b -> LxExpr (LxBinop a b t) makeUnique pos)
+lxinfixr m t = InfixR (m $> \a@(LxExpr _ _ pos) b -> LxExpr (LxBinop a b t) makeUnique pos)
+lxinfix m t = InfixN (m $> \a@(LxExpr _ _ pos) b -> LxExpr (LxBinop a b t) makeUnique pos)
+lxprefix m t = Prefix (m $> \a@(LxExpr _ _ pos) -> LxExpr (LxUnary False t a) makeUnique pos)
+lxpostfix m t = Prefix (m $> \a@(LxExpr _ _ pos) -> LxExpr (LxUnary False t a) makeUnique pos)
 parsePrimary :: LoxParser LxExpr 
 parsePrimary = choice 
-  [ lxtrue $> LxLit (PLvBool True)
-  , lxfalse $> LxLit (PLvBool False) 
-  , lxnil $> LxLit PLvNil
-  , LxLit . PLvNumber <$> lxnumber
-  , LxLit . PLvString <$> lxstring
-  , LxGroup <$> between lxlparen lxrparen parseLxExpr
-  , LxIdent_ <$> lxidentEither]
+  [ lxtrue *> makeExpr (LxLit (PLvBool True))
+  , lxfalse *> makeExpr (LxLit (PLvBool False))
+  , lxnil *> makeExpr (LxLit PLvNil)
+  , makeExpr . LxLit . PLvNumber =<< lxnumber
+  , makeExpr . LxLit . PLvString =<< lxstring
+  , makeExpr . LxGroup =<< between lxlparen lxrparen parseLxExpr
+  , makeExpr . LxIdent =<< lxidentEither]
 lexSpace :: LoxParser () 
 lexSpace = L.space MC.space1 (L.skipLineComment "//") (L.skipBlockCommentNested "/*" "*/")
 
@@ -210,3 +218,7 @@ notReservedKeyword :: LoxParser ()
 notReservedKeyword = notFollowedBy (choice [lxand, lxclass, lxelse, lxfalse, lxfun, lxfor, lxif, lxnil, lxor, lxprint, lxreturn, lxsuper, lxthis, lxtrue, lxvar, lxwhile])
 lxstring    = lexeme (between "\"" "\"" (takeWhileP Nothing (`notElem` ("\n\"" :: [Char]))))
 
+makeExpr :: LxExprNode -> LoxParser LxExpr
+makeExpr node = LxExpr node makeUnique <$> getSourcePos
+makeUnique = unsafePerformIO newUnique
+{-# NOINLINE makeUnique #-}
