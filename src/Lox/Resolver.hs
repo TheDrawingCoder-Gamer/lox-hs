@@ -5,7 +5,7 @@ import Lox.Types
 import Polysemy
 import Polysemy.State
 import Polysemy.Fail
-import Data.HashMap.Strict qualified as HM
+import Data.HashMap.Lazy qualified as HM
 import Data.Text qualified as T
 import Data.Traversable (traverse)
 import Data.Foldable    (traverse_)

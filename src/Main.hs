@@ -25,8 +25,8 @@ import Data.Bifunctor qualified as BFu
 import Data.Bitraversable qualified as BFt
 import Polysemy.Fixpoint
 main :: IO ()
-main = void $ runFinal $ fixpointToFinal . runError . PS.evalState (T.empty, False) . PS.evalState [envWithNative] . PSS.stackStateToState $ haskelineToIOFinal loop
-loop :: Sem [Haskeline, PSS.StackState LxEnv, PS.State (T.Text, Bool), Error ReturnState, Fixpoint, Final IO] () 
+main = void $ runFinal $ fixpointToFinal . runError . PS.evalState [] . PS.evalState (T.empty, False) . PS.evalState [envWithNative] . PSS.stackStateToState $ haskelineToIOFinal loop
+loop :: Sem [Haskeline, PSS.StackState LxEnv, PS.State (T.Text, Bool), PS.State [R.Scope], Error ReturnState, Fixpoint, Final IO] () 
 loop = do 
   (txt, active) <- PS.get @(T.Text, Bool)
   line <- getInputLine $ if active then ">>: " else ">>> " 
@@ -67,7 +67,7 @@ loop = do
             "q" -> pure ()
             "quit" -> pure ()
             bad -> outputStrLn $ "Unknown command " <> bad
-interp :: Members [Haskeline, PSS.StackState LxEnv, Error ReturnState, Final IO, Fixpoint] r => T.Text -> Sem r ()
+interp :: Members [Haskeline, PSS.StackState LxEnv, PS.State [R.Scope], Error ReturnState, Final IO, Fixpoint] r => T.Text -> Sem r ()
 interp inp = do 
   let expr' = parse parseLox "REPL" inp
   env <- PSS.get
@@ -81,7 +81,7 @@ interp inp = do
           case s of 
             Left e -> outputStrLn e
             Right ss -> do
-              res <- runFail (lxStmts ss)
+              res <- traceToHaskeline $ runFail (lxStmts ss)
               case res of 
                 Left e -> outputStrLn e
                 Right e -> pure ()
@@ -89,7 +89,7 @@ interp inp = do
           case s of 
             Left e -> outputStrLn e
             Right e -> do 
-              res <- runFail (lxEvaluate e) 
+              res <- traceToHaskeline $ runFail (lxEvaluate e) 
               case res of 
                 Left e -> outputStrLn e
                 Right e -> outputStrLn (prettyLoxValue e)

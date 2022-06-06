@@ -9,7 +9,7 @@ import Data.Text qualified as T
 import Control.Monad.Combinators.Expr
 import Data.Char
 import Data.Set qualified as S
-import Data.HashMap.Strict qualified as HM
+import Data.HashMap.Lazy qualified as HM
 import Data.Maybe (fromMaybe)
 import Control.Monad (when)
 parseLox :: LoxParser (Either [LxStmt] LxExpr)

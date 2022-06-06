@@ -7,9 +7,8 @@ import Data.Text qualified as T
 import Polysemy
 import Data.Time.Clock.System
 import Polysemy.StackState
-import Data.HashMap.Strict qualified as HM
+import Data.HashMap.Lazy qualified as HM
 import Polysemy.Fail
-import Polysemy.Haskeline
 import Polysemy.Error
 import Polysemy.Fixpoint
 import Prelude 
@@ -22,26 +21,28 @@ import Data.Maybe (maybe, fromMaybe)
 import Data.Bool (bool)
 import Data.Coerce (coerce)
 import Lox.Helpers
+import Polysemy.Trace
+import Debug.Trace (traceIO)
+import Data.List (intersperse)
 lxRun :: Members LxMembers r => Either [LxStmt] LxExpr -> Sem r ()
 lxRun = \case 
     Left stmts -> lxStmts stmts
-    Right expr -> lxEvaluate expr >>= outputStrLn . prettyLoxValue
+    Right expr -> lxEvaluate expr >>= trace . prettyLoxValue
 lxStmts :: Members LxMembers r =>  [LxStmt] -> Sem r ()
 lxStmts = traverse_ lxStmt
 lxStmt :: Members LxMembers r => LxStmt -> Sem r ()
 lxStmt = \case
   LxExprStmt e -> lxEvaluate e >> pure ()
-  LxPrint e -> lxEvaluate e >>= outputStrLn . prettyLoxValue
+  LxPrint e -> lxEvaluate e >>= trace . prettyLoxValue
   LxVar n (Just v) -> lxEvaluate v >>= lxDefine n
   LxVar n Nothing -> lxDefine n LvNil
   LxBlock stmts -> lxEnterBlock *> (lxStmts stmts <* lxLeaveBlock)
   LxIf b i e -> bool (maybe (pure ()) lxStmt e) (lxStmt i) . lxTruthy =<< lxEvaluate b
   LxWhile b d -> lxWhile b d
-  LxFunDecl decl@(FunDecl n (FunInfo ps ss)) -> mdo
-    lxDefine n LvNil
-    fun <- LvFun decl <$> (lxAssignAt 0 n fun *> get)
-    lxDefine n fun
-
+  LxFunDecl decl@(FunDecl n _) -> do
+    rec fun <- LvFun decl <$> (lxDefine n fun *> get)
+    -- trace . printEnvKeys =<< get
+    pure () 
   LxClassDecl name methods -> 
     lxDefine name (LvClass (LoxClass name methods))    
   LxReturn ret -> do 
@@ -129,9 +130,7 @@ lxEvaluate (LxUnary _ t e) = do
 lxEvaluate (LxBinop (LxIdent n) re LxAssign) = fail "unreachable"
 lxEvaluate (LxEAssign (IdentInfo name depth) expr) = do 
   e <- lxEvaluate expr
-  case depth of 
-    Nothing -> lxAssignGlobal_ name e 
-    Just d  -> lxAssignAt d name e
+  lxAssign depth name e
   pure e
 
 lxEvaluate (LxBinop le re t) = do 
@@ -147,8 +146,8 @@ lxEvaluate (LxBinop le re t) = do
         pure l 
       else 
         lxEvaluate re
-    _ -> lxEvalEquality l re t 
-lxEvaluate (LxCall callee args) = uncurry lxCall =<< (,) <$> lxEvaluate callee <*> traverse lxEvaluate args
+    _ -> lxEvalEquality l re t
+lxEvaluate (LxCall callee args) = uncurry3 lxCall =<< (,,) <$> lxEvaluate callee <*> traverse lxEvaluate args <*> pure (getIdent callee)
 -- for things that don't short circut
 lxEvalEquality :: Members LxMembers r => LoxValue -> LxExpr -> LxBinopKind -> Sem r LoxValue
 lxEvalEquality l re t = do 
@@ -177,26 +176,34 @@ lxEvalNumeric l r t = do
     LxLess      -> pure $ LvBool   $ ln < rn
     LxLessEq    -> pure $ LvBool   $ ln <= rn
     _           -> fail "bad eval"
-     
-lxCall :: Members LxMembers r => LoxValue -> [LoxValue] -> Sem r LoxValue
-lxCall daValue@(LvFun f@(FunDecl' name ps ss ) closure) args = 
+lxAssign :: Members [Fail, StackState LxEnv] r => Maybe Int -> T.Text -> LoxValue -> Sem r () 
+lxAssign depth k v = 
+  case depth of 
+    Nothing -> lxAssignGlobal_ k v
+    Just d  -> lxAssignAt d k v
+lxCall :: Members LxMembers r => LoxValue -> [LoxValue] -> Maybe IdentInfo -> Sem r LoxValue
+lxCall daValue@(LvFun f@(FunDecl' _ ps ss ) closure) args infos = 
   if compareLengthLs args ps == EQ then do
     oldEnv <- get @LxEnv
-    catch @ReturnState (put closure *> runFunDecl args ps ss $> LvNil) (\(_, ret) -> do 
+    catch @ReturnState (put closure *> runFunDecl args ps ss $> LvNil) (\(newClosure, ret) -> do 
+      lxLeaveBlock
       put oldEnv
+      case infos of 
+        Just (IdentInfo name depth) -> lxAssign depth name (LvFun (FunDecl' name ps ss) newClosure)
+        _ -> pure ()
       pure ret)  
   else 
     -- showing length kinda defeats the point of the compareLength
     fail $ "Expected " <> show (length ps) <> " args but got " <> show (length args)
-lxCall (LvNativeFun (LoxNativeFun name (LoxFunction fun) arity)) args = 
+lxCall (LvNativeFun (LoxNativeFun name fun arity)) args _ = 
   if compareLength args arity == EQ then do 
-    oldEnv <- get @LxEnv
-    catch @ReturnState (fun args $> LvNil) (\(_, ret) -> put oldEnv $> ret)
+    fun args
   else 
     fail $ "Expected " <> show arity <> " args but got " <> show (length args)
-lxCall _ _ = fail "Only functions and classes can be called"
+lxCall _ _ _ = fail "Only functions and classes can be called"
 runFunDecl :: Members LxMembers r => [LoxValue] -> [T.Text] -> [LxStmt] -> Sem r ()
-runFunDecl args ps ss = do 
+runFunDecl args ps ss = do
+  lxEnterBlock
   traverse_ (uncurry lxDefine) (zip ps args)
   lxStmts ss
   pure ()
@@ -223,4 +230,9 @@ compareLength = foldr (\_ acc n -> if n > 0 then acc (n - 1) else GT) (compare 0
 lxEqual :: LoxValue -> LoxValue -> Bool 
 lxEqual = (==)
 
+uncurry3 f (a, b, c) = f a b c
 
+getIdent :: LxExpr -> Maybe IdentInfo
+getIdent (LxIdent infos) = Just infos
+getIdent (LxCall callee _) = getIdent callee
+getIdent _ = Nothing

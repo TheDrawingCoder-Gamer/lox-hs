@@ -5,6 +5,7 @@ import Polysemy
 import Polysemy.Embed
 import System.Console.Haskeline qualified as H
 import System.Console.Haskeline.IO qualified as H
+import Polysemy.Trace qualified as T
 import System.Console.Haskeline.Completion (noCompletion)
 import Control.Monad.Catch
 data Haskeline m a where 
@@ -57,3 +58,9 @@ haskelineToIO = haskelineToIOSettings (H.setComplete noCompletion H.defaultSetti
 
 haskelineToIOFinal :: Member (Final IO) r => Sem (Haskeline ': r) a -> Sem r a
 haskelineToIOFinal = haskelineToIOSettingsFinal (H.setComplete noCompletion H.defaultSettings)
+
+traceToHaskeline :: forall (r :: EffectRow) a. Member Haskeline r => Sem (T.Trace ': r) a -> Sem r a
+traceToHaskeline = transform @T.Trace @Haskeline (\case 
+  T.Trace e -> OutputStrLn e)
+
+  

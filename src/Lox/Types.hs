@@ -5,7 +5,8 @@ import Text.Megaparsec hiding (State)
 import Data.Void
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.HashMap.Strict qualified as HM
+-- lazy because of closures
+import Data.HashMap.Lazy qualified as HM
 import Polysemy
 import Polysemy.StackState
 import Polysemy.Fail
@@ -13,6 +14,7 @@ import Polysemy.Haskeline
 import Polysemy.Error
 import Polysemy.Fixpoint
 import Data.Hashable
+import Polysemy.Trace (Trace)
 import GHC.Generics (Generic)
 type LoxParser = Parsec Text Text
 instance ShowErrorComponent Text where 
@@ -39,7 +41,7 @@ data LoxClass = LoxClass Text (HM.HashMap Text FunInfo)
   deriving (Show, Generic, Hashable)
 data LoxNativeFun = LoxNativeFun 
   { lvName :: Text 
-  , lvFun :: LoxFunction
+  , lvFun :: NativeFunDecl
   , lvArity :: Int }
 instance Eq LoxValue where 
   (LvString s) == (LvString t) = s == t 
@@ -117,8 +119,8 @@ data FunKind
 newtype LxEnv = LxEnv 
   { variables :: HM.HashMap Text LoxValue }
 type ReturnState = ([LxEnv], LoxValue)
-newtype LoxFunction = LoxFunction (forall r. Members LxMembers r => [LoxValue] -> Sem r ())
-type LxMembers = [Fail, StackState LxEnv, Error ReturnState, Fixpoint, Haskeline, Final IO]
+type NativeFunDecl = forall r. Members LxMembers r => [LoxValue] -> Sem r LoxValue
+type LxMembers = [Fail, StackState LxEnv, Error ReturnState, Fixpoint, Trace, Final IO]
 {-# COMPLETE FunDecl' #-}
 {-# COMPLETE IdentInfo_ #-}
 {-# COMPLETE LxIdent_, LxBinop, LxGroup, LxLit, LxEAssign, LxUnary, LxCall #-}

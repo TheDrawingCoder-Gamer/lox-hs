@@ -1,7 +1,9 @@
 module Lox.Helpers where 
 
 import Lox.Types
-import Data.HashMap.Strict qualified as HM
+import Data.HashMap.Lazy qualified as HM
+import Data.Text qualified as T
+import Data.Coerce
 emptyEnv = LxEnv HM.empty
 
 unsnoc :: [a] -> Maybe ([a], a)
@@ -16,3 +18,6 @@ unsnoc xs =
     unsnoc' _ [] = Nothing
 snoc :: [a] -> a -> [a]
 snoc a b = a ++ pure b
+
+printEnvKeys :: [LxEnv] -> String
+printEnvKeys = coerce ((show . map (map T.unpack . HM.keys)) :: [HM.HashMap T.Text LoxValue] -> String)
