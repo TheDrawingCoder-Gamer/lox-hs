@@ -1,10 +1,5 @@
 module Lox.Helpers where 
 
-import Lox.Types
-import Data.HashMap.Lazy qualified as HM
-import Data.Text qualified as T
-import Data.Coerce
-emptyEnv = LxEnv HM.empty
 
 unsnoc :: [a] -> Maybe ([a], a)
 unsnoc xs = 
@@ -19,5 +14,12 @@ unsnoc xs =
 snoc :: [a] -> a -> [a]
 snoc a b = a ++ pure b
 
-printEnvKeys :: [LxEnv] -> String
-printEnvKeys = coerce ((show . map (map T.unpack . HM.keys)) :: [HM.HashMap T.Text LoxValue] -> String)
+ifM b t f = do b <- b; if b then t else f
+
+infixr 2 <||>
+infixr 3 <&&>
+(<||>) a = ifM a (pure True)
+(<&&>) t f = ifM t f (pure False)
+
+anyM p = foldr ((<||>) . p) (pure False)
+andM p = foldr ((<&&>) . p) (pure True)

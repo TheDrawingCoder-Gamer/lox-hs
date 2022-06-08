@@ -1,6 +1,7 @@
 {-# LANGUAGE ConstraintKinds #-}
 module Lox.Resolver where
 
+{-
 import Lox.Types
 import Polysemy
 import Polysemy.State
@@ -115,3 +116,4 @@ data ResolverState = ResolverState
   { locals  :: HM.HashMap LxExpr Int 
   , scopes :: [Scope]} 
 type ResolverMembers r = Members [State ResolverState, Fail] r
+-}

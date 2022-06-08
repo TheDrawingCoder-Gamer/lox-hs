@@ -22,11 +22,14 @@ executable lox-hs
   other-modules:
       Lox.Evaluate
       Lox.Helpers
+      Lox.Interp
       Lox.NativeFun
       Lox.Parser
       Lox.Resolver
       Lox.Types
+      Polysemy.Counter
       Polysemy.Haskeline
+      Polysemy.Megaparsec
       Polysemy.StackState
       Paths_lox_hs
   hs-source-dirs:

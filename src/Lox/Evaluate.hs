@@ -1,6 +1,6 @@
 {-# LANGUAGE RecursiveDo, RecordWildCards #-}
-module Lox.Evaluate (lxRun, lxEvaluate, lxStmts, lxStmt) where 
-
+module Lox.Evaluate  {- (lxRun, lxEvaluate, lxStmts, lxStmt) -} where 
+{-
 import Lox.Types
 import Lox.Resolver qualified as R
 import Data.Text qualified as T
@@ -272,6 +272,6 @@ peekN n = do
       peekN' =<< embedFinal (readIORef en)
     peekN' _ _ = Nothing
     
-    
+-}
       
 
