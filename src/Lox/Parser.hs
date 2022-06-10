@@ -1,4 +1,4 @@
-module Lox.Parser (parseLox, parseLxExpr) where
+module Lox.Parser {- (parseLox, parseLxExpr, manyLxArgs, parseLxCall) -}where
 
 import Lox.Types
 import Text.Megaparsec
@@ -11,14 +11,14 @@ import Data.Char
 import Data.Set qualified as S
 import Data.Map.Strict qualified as M
 import Data.Maybe (fromMaybe)
-import Control.Monad (when, (>=>))
+import Control.Monad (when, (>=>), MonadPlus)
 import Data.Unique
 import System.IO.Unsafe (unsafePerformIO)
 import Data.IORef
 parseLox :: LoxParser (Either [Stmt] Expr)
 parseLox = choice 
   [try (many parseLxDecl <* eof)  <&> Left
-  , parseLxExpr <&> Right] -- todo: if both fail show stmt error as it's more likely what is wanted
+  , (parseLxExpr <* eof) <&> Right] -- todo: if both fail show stmt error as it's more likely what is wanted
 parseLxDecl :: LoxParser Stmt
 parseLxDecl = choice 
   [parseClassDecl
@@ -46,10 +46,19 @@ parseFunDecl FunMethod = LFunDecl <$> parseFun
 parseFun :: LoxParser FunDecl
 parseFun = try $ do 
   name <- lxident 
+  FunDecl name <$> parseMeatFun
+parseMeatFun :: LoxParser FunInfo
+parseMeatFun = do 
   params <- parseParams
   when (length params >= 255) $ registerCustomFailure "Can't have more than 255 params"
   Block ss <- parseBlock
-  pure $ FunDecl name $ FunInfo params (ss ++ [LReturn Nothing])
+  pure $ FunInfo params (ss ++ [LReturn Nothing])
+parseAnonFun :: LoxParser Expr
+parseAnonFun = do 
+  lxfun
+  pos <- getSourcePos
+  FunInfo params ss <- parseMeatFun
+  pure $ Expr (AnonFun params ss) pos 
 parseParams :: LoxParser [T.Text] 
 parseParams = try $ between lxlparen lxrparen $ sepBy lxident lxcomma
 parseLxStmt :: LoxParser Stmt
@@ -96,9 +105,9 @@ parseForStmt = try $ do
   incrPos <- getSourcePos
   lxrparen
   body <- parseLxStmt
-  let whileBody = Block [body, Eval $ fromMaybe (Expr (Literal LoxNil) incrPos getCount) incrementer]
-      whileLoop = LWhile (fromMaybe (Expr (Literal (LoxBool True)) condPos getCount) condition) whileBody
-  pure $ Block [fromMaybe (Eval (Expr (Literal LoxNil) condPos getCount)) initializer, whileLoop] 
+  let whileBody = Block [body, Eval $ fromMaybe (Expr (Literal LoxNil) incrPos) incrementer]
+      whileLoop = LWhile (fromMaybe (Expr (Literal (LoxBool True)) condPos) condition) whileBody
+  pure $ Block [fromMaybe (Eval (Expr (Literal LoxNil) initPos)) initializer, whileLoop] 
 parseReturnStmt :: LoxParser Stmt
 parseReturnStmt = try $ do 
   lxreturn
@@ -106,25 +115,27 @@ parseReturnStmt = try $ do
 
 
 parseLxExpr :: LoxParser Expr
-parseLxExpr = parseLxCall <|> parseOpExpr
+parseLxExpr = parseAssign
 
 parseLxCall :: LoxParser Expr
-parseLxCall = try $ do 
-  daFunCall <- Call <$> parsePrimary <*> parseArgs
-  srcPos <- getSourcePos
-  let expr = Expr daFunCall srcPos getCount
-  manyLxArgs expr
-    
+parseLxCall = manyLxArgs =<< parsePrimary 
 manyLxArgs :: Expr -> LoxParser Expr
-manyLxArgs e = do 
-  option e $ do 
-    srcPos <- getSourcePos
-    manyLxArgs . (\args -> Expr (Call e args) srcPos getCount) =<< parseArgs
-parseArgs :: LoxParser [Expr]
-parseArgs = do 
-  args <- between lxlparen lxrparen $ sepBy parseLxExpr lxcomma
+manyLxArgs e = 
+  option e (try $ manyLxArgs =<< choice [parseArgs e, parseGet e])
+parseArgs :: Expr -> LoxParser Expr
+parseArgs e = try $ do 
+  pos <- getSourcePos
+  args <- between lxlparen lxrparen (sepBy parseLxExpr lxcomma)
   when (length args >= 255) $ registerCustomFailure "Can't have more than 255 arguments"
-  pure args
+  pure $ Expr (Call e args) pos
+parseGet :: Expr -> LoxParser Expr
+parseGet e = try $ do 
+  lxdot
+  pos <- getSourcePos
+  field <- lxident
+  pure $ Expr (Get e field) pos
+
+{-
 parseOpExpr = try $ do 
   expr <- makeExprParser parsePrimary [
       [lxprefix lxminus Negate
@@ -143,27 +154,73 @@ parseOpExpr = try $ do
     , [lxinfixl lxor        Or]
     , [lxassignop lxassign]]
   (case expr of 
-    Expr (LxParseFail f) _ _-> registerCustomFailure f
+    Expr (LxParseFail f) _-> registerCustomFailure f
     _ -> pure ()) $> expr
-registerCustomFailure = registerFancyFailure . S.singleton . ErrorCustom
 
-lxassignop m = InfixR (m $> \a@(Expr _ pos idn) b -> 
+
+lxassignop m = InfixR (m $> \a@(Expr _ pos) b -> 
   case a of
-    Expr (Identifier name) _ _ -> Expr (Assign name b) pos idn
-    _ -> Expr (LxParseFail "Expected identifier on left side of assignment") pos idn)
-lxinfixl m t = InfixL (m $> \a@(Expr _ pos _) b -> Expr (Binop a b t) pos getCount)
-lxinfixr m t = InfixR (m $> \a@(Expr _ pos _) b -> Expr (Binop a b t) pos getCount)
-lxinfix m t = InfixN (m $> \a@(Expr _ pos _) b -> Expr (Binop a b t) pos getCount)
-lxprefix m t = Prefix (m $> \a@(Expr _ pos _) -> Expr (Unary t a) pos getCount)
-lxpostfix m t = Prefix (m $> \a@(Expr _ pos _) -> Expr (Unary t a) pos getCount)
+    Expr (Identifier name) _ -> Expr (Assign name b) pos
+    Expr (Get e name) _ -> Expr (Set e name b) pos
+    _ -> Expr (LxParseFail "Expected identifier on left side of assignment") pos)
+lxinfixl m t = InfixL (m $> \a@(Expr _ pos) b -> Expr (Binop a b t) pos)
+lxinfixr m t = InfixR (m $> \a@(Expr _ pos) b -> Expr (Binop a b t) pos)
+lxinfix m t = InfixN (m $> \a@(Expr _ pos) b -> Expr (Binop a b t) pos)
+lxprefix m t = Prefix (m $> \a@(Expr _ pos) -> Expr (Unary t a) pos)
+lxpostfix m t = Prefix (m $> \a@(Expr _ pos) -> Expr (Unary t a) pos)
+-}
+lxbinop :: LoxParser a -> BinopKind -> LoxParser (Expr -> Expr -> Expr)
+lxbinop m t = m $> \a@(Expr _ pos) b -> Expr (Binop a b t) pos
+
+parseAssign :: LoxParser Expr 
+parseAssign = try (do
+  call <- optional (try $ parseLxCall <* lxdot)             
+  ident <- lxident
+  pos <- getSourcePos
+  lxassign
+  expr <- parseAssign
+  pure (case call of 
+    Nothing -> Expr (Assign ident expr) pos
+    Just c  -> Expr (Set c ident expr) pos))
+  <|> parseLogicOr
+parseLogicOr :: LoxParser Expr 
+parseLogicOr = chainl1 parseLogicAnd (lxbinop lxor Or) 
+parseLogicAnd :: LoxParser Expr
+parseLogicAnd = chainl1 parseEquality (lxbinop lxequals Equals)
+parseEquality :: LoxParser Expr
+parseEquality = chainl1 parseComparison (choice [lxbinop lxequals Equals, lxbinop lxnequal Unequal])
+
+parseComparison :: LoxParser Expr
+parseComparison = chainl1 parseTerm 
+  (choice 
+  [ lxbinop lxgreatereq GreaterEq
+  , lxbinop lxgreater   Greater
+  , lxbinop lxless      Less
+  , lxbinop lxlesseq    LessEq ])
+
+parseTerm :: LoxParser Expr
+parseTerm = chainl1 parseFactor (choice [lxbinop lxplus Plus, lxbinop lxminus Minus])
+
+parseFactor :: LoxParser Expr
+parseFactor = chainl1 parseUnary (choice [lxbinop lxstar Times, lxbinop lxslash Divide])
+
+parseUnary :: LoxParser Expr
+parseUnary = (do 
+  op <- choice [lxbang $> Not, lxminus $> Negate]
+  pos <- getSourcePos
+  Expr <$> (Unary op <$> parseUnary) <*> pure pos) <|> parseLxCall 
+
+
 parsePrimary :: LoxParser Expr 
 parsePrimary = choice 
-  [ lxtrue *> makeExpr (Literal (LoxBool True))
+  [ parseAnonFun
+  , lxtrue *> makeExpr (Literal (LoxBool True))
   , lxfalse *> makeExpr (Literal (LoxBool False))
   , lxnil *> makeExpr (Literal LoxNil)
   , makeExpr . Literal . LoxNumber =<< lxnumber
   , makeExpr . Literal . LoxString =<< lxstring
   , makeExpr . Grouping =<< between lxlparen lxrparen parseLxExpr
+  , lxthis *> makeExpr LThis
   , makeExpr . Identifier =<< lxidentEither]
 lexSpace :: LoxParser () 
 lexSpace = L.space MC.space1 (L.skipLineComment "//") (L.skipBlockCommentNested "/*" "*/")
@@ -231,13 +288,16 @@ notReservedKeyword = notFollowedBy (choice [lxand, lxclass, lxelse, lxfalse, lxf
 lxstring    = lexeme (between "\"" "\"" (takeWhileP Nothing (`notElem` ("\n\"" :: [Char]))))
 
 makeExpr :: ExprNode -> LoxParser Expr
-makeExpr node = Expr node <$> getSourcePos <*> pure getCount
+makeExpr node = Expr node <$> getSourcePos 
 
-counter :: IORef Int
-counter = unsafePerformIO $ newIORef 0
-{-# NOINLINE counter #-}
+chainl  :: MonadPlus m => m a -> m (a -> a -> a) -> a -> m a 
+chainl p op x = option x (chainl1 p op)
+chainl1 :: MonadPlus m => m a -> m (a -> a -> a) -> m a
+chainl1 p op = p >>= rest
+  where 
+    rest x = do f <- op
+                y <- p 
+                rest (f x y)
+            <|> pure x
 
-getCount :: Int 
-getCount = unsafePerformIO $ readIORef counter <* modifyIORef' counter (+1) 
-
-{-# NOINLINE getCount #-}
+registerCustomFailure = registerFancyFailure . S.singleton . ErrorCustom

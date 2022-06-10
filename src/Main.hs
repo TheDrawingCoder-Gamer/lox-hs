@@ -26,8 +26,8 @@ import Data.Bitraversable qualified as BFt
 import Polysemy.Fixpoint
 import Data.Functor (($>))
 main :: IO ()
-main = void $ runFinal $ fixpointToFinal . runError . runCounter . PS.evalState (T.empty, False) . PS.evalState M.empty . PS.evalState M.empty . PS.evalState M.empty $ haskelineToIOFinal loop
-loop :: Sem [Haskeline, PS.State Heap, PS.State Stack, PS.State FunClosures, PS.State (T.Text, Bool), Counter, Error InterpError, Fixpoint, Final IO] () 
+main = void $ runFinal $ fixpointToFinal . runError . runCounter . PS.evalState (T.empty, False) . PS.evalState M.empty . PS.evalState M.empty . PS.evalState M.empty . PS.evalState M.empty $ haskelineToIOFinal loop
+loop :: Sem [Haskeline, PS.State Heap, PS.State Stack, PS.State RefHeap, PS.State FunClosures, PS.State (T.Text, Bool), Counter, Error InterpError, Fixpoint, Final IO] () 
 loop = do 
   (txt, active) <- PS.get @(T.Text, Bool)
   line <- getInputLine $ if active then ">>: " else ">>> " 
@@ -47,7 +47,14 @@ loop = do
         Just ln' -> 
           let (cmd, rest) = BFu.second (dropWhile isSeparator) $ break isSeparator ln' in
           case cmd of 
-            "ast" -> outputStrLn (show (parse parseLox "REPL" (T.pack rest))) *> loop
+            "ast" -> do 
+              let ast = parse parseLox "REPL" (T.pack rest) 
+              case ast of 
+                Left e -> 
+                  outputStrLn (errorBundlePretty e) 
+                Right e -> 
+                  outputStrLn (show e) 
+              loop
             "{"   -> do 
               if active then 
                 outputStrLn "Can't start multiline while in a multiline"
@@ -68,11 +75,13 @@ loop = do
             "q" -> pure ()
             "quit" -> pure ()
             "heap" -> (outputStrLn . show . M.map prettyLoxValue =<< PS.get @Heap) *> loop
+            "refheap" -> (outputStrLn . show . M.map prettyLoxRefValue =<< PS.get @RefHeap) *> loop
             "stack" -> (outputStrLn . show =<< PS.get @Stack) *> loop
             "vars"  -> (outputStrLn . show . M.map prettyLoxValue =<< (M.compose <$> PS.get @Heap <*> PS.get @Stack)) *> loop
             "closures" -> (outputStrLn . show =<< PS.get @FunClosures) *> loop
+            "r" -> PS.put @Heap M.empty *> PS.put @Stack M.empty *> PS.put @FunClosures M.empty *> PS.put @RefHeap M.empty *> loop
             bad -> outputStrLn ("Unknown command " <> bad) *> loop
-interp :: Members [Haskeline, PS.State Heap, PS.State Stack, PS.State FunClosures, Counter, Error InterpError, Final IO, Fixpoint] r => T.Text -> Sem r ()
+interp :: Members [Haskeline, PS.State Heap, PS.State Stack, PS.State RefHeap, PS.State FunClosures, Counter, Error InterpError, Final IO, Fixpoint] r => T.Text -> Sem r ()
 interp inp = do 
   let expr' = parse parseLox "REPL" inp
   stack <- PS.get @Stack
@@ -84,10 +93,7 @@ interp inp = do
       val <- traceToHaskeline $ runError @InterpError (PR.runReader stack (interpret expr))
       case val of 
         Left e -> 
-          outputStrLn $ case e of 
-            Unexpected -> "panic! (the 'impossible' happened)"
-            InterpreterError pos err -> "Error at " ++ sourcePosPretty pos ++ ": " ++ err
-            ReturnError _ -> "Uncaught return - perhaps you returned at top level?"
+          outputStrLn $ showInterpError e 
         Right newStack -> PS.put @Stack newStack
 
 

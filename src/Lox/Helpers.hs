@@ -1,6 +1,7 @@
 module Lox.Helpers where 
 
-
+import Data.Map.Strict qualified as M
+import Control.Monad (foldM)
 unsnoc :: [a] -> Maybe ([a], a)
 unsnoc xs = 
   unsnoc' [] xs 
@@ -23,3 +24,6 @@ infixr 3 <&&>
 
 anyM p = foldr ((<||>) . p) (pure False)
 andM p = foldr ((<&&>) . p) (pure True)
+
+foldMWithKey :: Monad m => (a -> k -> b -> m a) -> a -> M.Map k b -> m a
+foldMWithKey f z = foldM (\z' (kx, x) -> f z' kx x) z . M.toAscList

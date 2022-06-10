@@ -21,29 +21,41 @@ instance ShowErrorComponent Text where
   errorComponentLen = T.length
 data InterpError
   = Unexpected
+  | UnexpectedPos SourcePos
   | InterpreterError SourcePos String -- string to aid in throwing
-  | ReturnError LoxValue 
+  | ReturnError LoxValue
+
+showInterpError Unexpected = "something went wrong : (" 
+showInterpError (UnexpectedPos pos) = "Internal error at " ++ sourcePosPretty pos
+showInterpError (InterpreterError pos err) = "Error at " ++ sourcePosPretty pos ++ ": " ++ err
+showInterpError (ReturnError{}) = "uncaught return - perhaps you returned at top level?"
+
 data LoxValue 
   = LoxString Text
   | LoxNumber Double
   | LoxBool   Bool
   | LoxNil 
+  | LoxRef Int
+  | LoxMethodRef 
+    { funRefName    :: Text
+    , funRefBoundTo :: Int
+    , funRefRef     :: Int }
+  deriving (Eq, Ord, Show)
+data LoxRefValue 
+  = LoxClass LoxClassDef
+  | LoxInstance Text Int (M.Map Text Int) Int
   | LoxFun    
-    { funName :: Text 
+    { funName :: Maybe Text 
     , funArity :: Int
     , funId   :: Int
     , funArgs :: [Text]
     , funStmt :: [Stmt] }
-  | LoxClass  LoxClassDef
-  | LoxInstance Int LoxClassDef
   deriving (Eq, Ord, Show)
-
-data LoxClassDef = LoxClassDef Text (Maybe LoxValue) (M.Map Text LoxValue)
+data LoxClassDef = LoxClassDef Text (Maybe LoxValue) (M.Map Text Int) Int
   deriving (Eq, Ord, Show)
 data Expr = Expr 
   { exprNode :: ExprNode 
-  , exprPos  :: SourcePos 
-  , exprId   :: Int }
+  , exprPos  :: SourcePos }
   deriving (Eq, Ord, Show)
 
 data BinopKind 
@@ -71,10 +83,13 @@ data ExprNode
   | Unary UnaryKind Expr
   | Literal LoxValue
   | Assign Text Expr
+  | Get Expr Text
+  | Set Expr Text Expr
   | Identifier Text
   | Call Expr [Expr]
   | Grouping Expr
-  | LxParseFail T.Text -- I hate this
+  | AnonFun [Text] [Stmt]
+  | LThis
   deriving (Eq, Ord, Show)
 
 data Stmt 
@@ -96,9 +111,12 @@ prettyLoxValue (LoxNumber n) = show n
 prettyLoxValue (LoxBool True) = "true"
 prettyLoxValue (LoxBool False) = "false"
 prettyLoxValue LoxNil         = "nil"
-prettyLoxValue (LoxFun {funName=name}) = T.unpack $ "<fn " <> name <> ">"
-prettyLoxValue (LoxClass (LoxClassDef name _ _)) = T.unpack $ "class" <> name
-prettyLoxValue (LoxInstance _ (LoxClassDef name _ _)) = T.unpack $ name <> "instance"
+prettyLoxValue (LoxRef i) = "<ptr " ++ show i ++ ">"
+prettyLoxValue (LoxMethodRef name _ _) = T.unpack $ "<method " <> name <> ">"
+prettyLoxRefValue (LoxFun {funName=Just name}) = T.unpack $ "<fn " <> name <> ">"
+prettyLoxRefValue (LoxFun{}) = "<fn>"
+prettyLoxRefValue (LoxClass (LoxClassDef name _ _ _)) = T.unpack $ "class " <> name
+prettyLoxRefValue (LoxInstance name _ _ _) = T.unpack $ name <> " instance"
 data FunDecl = FunDecl Text FunInfo
   deriving (Eq, Ord, Show)
 data FunInfo = FunInfo [Text] [Stmt]
@@ -109,19 +127,21 @@ data ResLoc
 data FunKind 
   = FunNormal
   | FunMethod
+  deriving (Eq, Ord, Show)
 data EvalState = EvalState
   { evalEnv :: Heap
   , evalLocals :: M.Map Expr Int }
 --data EvalError 
 --  = EvalTypeError String
 
-type LxMembers = [Reader Stack, State Heap, State FunClosures, Counter, Error InterpError, Fixpoint, Trace, Final IO]
+type LxMembers = [Reader Stack, State Heap, State RefHeap, State FunClosures, Counter, Error InterpError, Fixpoint, Trace, Final IO]
 {-# COMPLETE FunDecl' #-}
 pattern LFunDecl' name args stmts = LFunDecl (FunDecl' name args stmts)
 pattern FunDecl' name args stmts = FunDecl name (FunInfo args stmts)
 
 
 type Heap = M.Map Int LoxValue
+type RefHeap = M.Map Int LoxRefValue
 type Stack = M.Map T.Text Int
 type FunClosures = M.Map Int Stack
 
