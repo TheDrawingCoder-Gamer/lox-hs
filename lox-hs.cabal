@@ -20,7 +20,6 @@ extra-source-files:
 executable lox-hs
   main-is: Main.hs
   other-modules:
-      Lox.Evaluate
       Lox.Helpers
       Lox.Interp
       Lox.NativeFun

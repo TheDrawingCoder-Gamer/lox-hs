@@ -2,6 +2,7 @@ module Lox.Helpers where
 
 import Data.Map.Strict qualified as M
 import Control.Monad (foldM)
+import Data.Maybe (maybe)
 unsnoc :: [a] -> Maybe ([a], a)
 unsnoc xs = 
   unsnoc' [] xs 
@@ -27,3 +28,7 @@ andM p = foldr ((<&&>) . p) (pure True)
 
 foldMWithKey :: Monad m => (a -> k -> b -> m a) -> a -> M.Map k b -> m a
 foldMWithKey f z = foldM (\z' (kx, x) -> f z' kx x) z . M.toAscList
+
+maybeM :: Monad m => m a -> m (Maybe a) -> m a
+maybeM def act = maybe def pure =<< act
+

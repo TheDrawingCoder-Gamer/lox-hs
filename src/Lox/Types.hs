@@ -1,4 +1,4 @@
-{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE PatternSynonyms, StandaloneDeriving #-}
 module Lox.Types where 
 
 import Text.Megaparsec hiding (State)
@@ -43,15 +43,20 @@ data LoxValue
   deriving (Eq, Ord, Show)
 data LoxRefValue 
   = LoxClass LoxClassDef
-  | LoxInstance Text Int (M.Map Text Int) Int
+  | LoxInstance 
+    { instName :: Text
+    , instClassRef :: Int
+    , instFields :: M.Map Text Int
+    , instIdN :: Int}
   | LoxFun    
     { funName :: Maybe Text 
     , funArity :: Int
     , funId   :: Int
     , funArgs :: [Text]
-    , funStmt :: [Stmt] }
-  deriving (Eq, Ord, Show)
-data LoxClassDef = LoxClassDef Text (Maybe LoxValue) (M.Map Text Int) Int
+    , funStmt :: [Stmt] 
+    , funInit :: Bool}
+  | LoxNativeFun Text (forall (r :: EffectRow). Members LxMembers r => [LoxValue] -> Sem r LoxValue) Int
+data LoxClassDef = LoxClassDef Text (Maybe Int) (M.Map Text Int) Int
   deriving (Eq, Ord, Show)
 data Expr = Expr 
   { exprNode :: ExprNode 
@@ -90,6 +95,7 @@ data ExprNode
   | Grouping Expr
   | AnonFun [Text] [Stmt]
   | LThis
+  | LSuper Text
   deriving (Eq, Ord, Show)
 
 data Stmt 
@@ -100,12 +106,15 @@ data Stmt
   | LIf Expr Stmt (Maybe Stmt)
   | LWhile Expr Stmt
   | LFunDecl FunDecl
-  | ClassDecl Text (M.Map Text FunInfo)
+  | ClassDecl Text (Maybe (WithPos Text)) (M.Map Text FunInfo)
   | LReturn (Maybe Expr)
-  | HeapDump
-  | StackDump
-  | ClosuresDump
   deriving (Eq, Ord, Show)
+
+data WithPos a = WithPos a SourcePos
+
+deriving instance Show a => Show (WithPos a)
+deriving instance Eq a => Eq (WithPos a)
+deriving instance Ord a => Ord (WithPos a)
 prettyLoxValue (LoxString n) = T.unpack n
 prettyLoxValue (LoxNumber n) = show n
 prettyLoxValue (LoxBool True) = "true"
@@ -117,6 +126,7 @@ prettyLoxRefValue (LoxFun {funName=Just name}) = T.unpack $ "<fn " <> name <> ">
 prettyLoxRefValue (LoxFun{}) = "<fn>"
 prettyLoxRefValue (LoxClass (LoxClassDef name _ _ _)) = T.unpack $ "class " <> name
 prettyLoxRefValue (LoxInstance name _ _ _) = T.unpack $ name <> " instance"
+prettyLoxRefValue (LoxNativeFun name _ _) = T.unpack name
 data FunDecl = FunDecl Text FunInfo
   deriving (Eq, Ord, Show)
 data FunInfo = FunInfo [Text] [Stmt]

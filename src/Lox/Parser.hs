@@ -1,4 +1,4 @@
-module Lox.Parser {- (parseLox, parseLxExpr, manyLxArgs, parseLxCall) -}where
+module Lox.Parser (parseLox, parseLxExpr) where
 
 import Lox.Types
 import Text.Megaparsec
@@ -27,10 +27,10 @@ parseLxDecl = choice
   ,parseLxStmt]
 parseClassDecl :: LoxParser Stmt
 parseClassDecl = try $ do 
-  lxclass 
-  ClassDecl
-    <$> lxpprident 
-    <*> (M.fromList . map (\(LFunDecl (FunDecl name info)) -> (name, info)) <$> between lxlbrace lxrbrace (many (parseFunDecl FunMethod)))
+  lxclass
+  ident <- lxident
+  superclass <- optional (lxless *> (WithPos <$> lxident <*> getSourcePos))
+  ClassDecl ident superclass <$> (M.fromList . map (\(LFunDecl (FunDecl name info)) -> (name, info)) <$> between lxlbrace lxrbrace (many (parseFunDecl FunMethod)))
 parseVarDecl :: LoxParser Stmt
 parseVarDecl = try $ uncurry VarDef <$> do 
   lxvar
@@ -63,10 +63,7 @@ parseParams :: LoxParser [T.Text]
 parseParams = try $ between lxlparen lxrparen $ sepBy lxident lxcomma
 parseLxStmt :: LoxParser Stmt
 parseLxStmt = choice
-  [ lxdumpheap $> HeapDump
-  , lxdumpstack $> StackDump
-  , lxdumpclosures $> ClosuresDump
-  , (lxprint *> (parseLxExpr <* lxsemicolon)) <&> Print
+  [ (lxprint *> (parseLxExpr <* lxsemicolon)) <&> Print
   , parseReturnStmt
   , parseBlock
   , parseIfStmt
@@ -173,15 +170,19 @@ lxbinop :: LoxParser a -> BinopKind -> LoxParser (Expr -> Expr -> Expr)
 lxbinop m t = m $> \a@(Expr _ pos) b -> Expr (Binop a b t) pos
 
 parseAssign :: LoxParser Expr 
-parseAssign = try (do
-  call <- optional (try $ parseLxCall <* lxdot)             
-  ident <- lxident
+parseAssign = try (do 
+  lexpr <- parseLogicOr 
   pos <- getSourcePos
   lxassign
-  expr <- parseAssign
-  pure (case call of 
-    Nothing -> Expr (Assign ident expr) pos
-    Just c  -> Expr (Set c ident expr) pos))
+  rexpr <- parseAssign
+  case lexpr of 
+    Expr (Identifier name) _ -> 
+      pure (Expr (Assign name rexpr) pos)
+    Expr (Get e name) _ -> 
+      pure (Expr (Set e name rexpr) pos)
+    -- todo: soft fail
+    _ -> fail "Left side of assign must be an identifier or a field access"
+  )
   <|> parseLogicOr
 parseLogicOr :: LoxParser Expr 
 parseLogicOr = chainl1 parseLogicAnd (lxbinop lxor Or) 
@@ -210,7 +211,13 @@ parseUnary = (do
   pos <- getSourcePos
   Expr <$> (Unary op <$> parseUnary) <*> pure pos) <|> parseLxCall 
 
-
+parseSuper :: LoxParser Expr
+parseSuper = do 
+  lxsuper
+  pos <- getSourcePos
+  lxdot
+  name <- lxident
+  pure $ Expr (LSuper name) pos
 parsePrimary :: LoxParser Expr 
 parsePrimary = choice 
   [ parseAnonFun
@@ -221,7 +228,8 @@ parsePrimary = choice
   , makeExpr . Literal . LoxString =<< lxstring
   , makeExpr . Grouping =<< between lxlparen lxrparen parseLxExpr
   , lxthis *> makeExpr LThis
-  , makeExpr . Identifier =<< lxidentEither]
+  , parseSuper
+  , makeExpr . Identifier =<< lxident]
 lexSpace :: LoxParser () 
 lexSpace = L.space MC.space1 (L.skipLineComment "//") (L.skipBlockCommentNested "/*" "*/")
 
@@ -274,8 +282,8 @@ lxidentGen       :: Bool -> LoxParser T.Text
 lxidentGen lower  = try (notReservedKeyword *> lexeme (T.cons 
                       <$> satisfy (validIdentStarter lower)
                       <*> takeWhileP Nothing validIdentTail))
-lxidentEither = lxident <|> lxpprident
-lxident = lxidentGen True
+lxident = lxidentLower <|> lxpprident
+lxidentLower = lxidentGen True
 lxpprident = lxidentGen False
 validIdentStarter :: Bool -> Char -> Bool
 validIdentStarter lower '_' = True
