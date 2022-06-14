@@ -20,12 +20,16 @@ extra-source-files:
 executable lox-hs
   main-is: Main.hs
   other-modules:
+      Lox.ArgParser
+      Lox.Compiler
+      Lox.Compiler.Chunk
       Lox.Helpers
       Lox.Interp
       Lox.NativeFun
       Lox.Parser
       Lox.Resolver
       Lox.Types
+      Polysemy.Build
       Polysemy.Counter
       Polysemy.Haskeline
       Polysemy.Megaparsec
@@ -50,10 +54,14 @@ executable lox-hs
   ghc-options: -fplugin=Polysemy.Plugin
   build-depends:
       base >=4.7 && <5
+    , binary
+    , bytestring
+    , cmdargs
     , containers
     , exceptions
     , hashable
     , haskeline
+    , lens
     , megaparsec
     , parser-combinators
     , polysemy

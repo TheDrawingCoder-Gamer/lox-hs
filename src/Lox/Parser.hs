@@ -1,4 +1,4 @@
-module Lox.Parser (parseLox, parseLxExpr) where
+module Lox.Parser (parseLox, parseLxExpr, parseLoxFile) where
 
 import Lox.Types
 import Text.Megaparsec
@@ -17,8 +17,10 @@ import System.IO.Unsafe (unsafePerformIO)
 import Data.IORef
 parseLox :: LoxParser (Either [Stmt] Expr)
 parseLox = choice 
-  [try (many parseLxDecl <* eof)  <&> Left
+  [try parseLoxFile  <&> Left
   , (parseLxExpr <* eof) <&> Right] -- todo: if both fail show stmt error as it's more likely what is wanted
+parseLoxFile :: LoxParser [Stmt] 
+parseLoxFile = many parseLxDecl <* eof
 parseLxDecl :: LoxParser Stmt
 parseLxDecl = choice 
   [parseClassDecl
@@ -28,21 +30,30 @@ parseLxDecl = choice
 parseClassDecl :: LoxParser Stmt
 parseClassDecl = try $ do 
   lxclass
+  pos <- getSourcePos
   ident <- lxident
   superclass <- optional (lxless *> (WithPos <$> lxident <*> getSourcePos))
-  ClassDecl ident superclass <$> (M.fromList . map (\(LFunDecl (FunDecl name info)) -> (name, info)) <$> between lxlbrace lxrbrace (many (parseFunDecl FunMethod)))
+  node <- ClassDecl ident superclass <$> (M.fromList . map (\(Stmt (LFunDecl (FunDecl name info)) _) -> (name, info)) <$> between lxlbrace lxrbrace (many (parseFunDecl FunMethod)))
+  pure $ Stmt node pos
 parseVarDecl :: LoxParser Stmt
-parseVarDecl = try $ uncurry VarDef <$> do 
+parseVarDecl = try $ do 
   lxvar
+  pos  <- getSourcePos
   name <- lxident
-  option (name, Nothing) (do 
+  node <- option (VarDef name Nothing) (do 
     lxassign
-    (,) name . Just <$> parseLxExpr) <* lxsemicolon
+    VarDef name . Just <$> parseLxExpr) <* lxsemicolon
+  pure $ Stmt node pos
 parseFunDecl :: FunKind -> LoxParser Stmt
 parseFunDecl FunNormal = try $ do 
   lxfun 
-  LFunDecl <$> parseFun
-parseFunDecl FunMethod = LFunDecl <$> parseFun
+  pos <- getSourcePos
+  node <- LFunDecl <$> parseFun
+  pure $ Stmt node pos
+parseFunDecl FunMethod = do
+  pos <- getSourcePos
+  node <- LFunDecl <$> parseFun
+  pure $ Stmt node pos
 parseFun :: LoxParser FunDecl
 parseFun = try $ do 
   name <- lxident 
@@ -51,8 +62,7 @@ parseMeatFun :: LoxParser FunInfo
 parseMeatFun = do 
   params <- parseParams
   when (length params >= 255) $ registerCustomFailure "Can't have more than 255 params"
-  Block ss <- parseBlock
-  pure $ FunInfo params (ss ++ [LReturn Nothing])
+  FunInfo params <$> parseBlockStmts
 parseAnonFun :: LoxParser Expr
 parseAnonFun = do 
   lxfun
@@ -63,7 +73,7 @@ parseParams :: LoxParser [T.Text]
 parseParams = try $ between lxlparen lxrparen $ sepBy lxident lxcomma
 parseLxStmt :: LoxParser Stmt
 parseLxStmt = choice
-  [ (lxprint *> (parseLxExpr <* lxsemicolon)) <&> Print
+  [ parsePrintStmt
   , parseReturnStmt
   , parseBlock
   , parseIfStmt
@@ -71,27 +81,48 @@ parseLxStmt = choice
   , parseWhileStmt
   , parseExprStmt
   ]
+parsePrintStmt :: LoxParser Stmt
+parsePrintStmt = try $ do 
+  lxprint 
+  pos <- getSourcePos
+  e <- parseLxExpr
+  lxsemicolon
+  pure $ Stmt (Print e) pos
 parseExprStmt :: LoxParser Stmt
-parseExprStmt = (parseLxExpr <* lxsemicolon) <&> Eval
+parseExprStmt = try $ do 
+  e@(Expr _ p) <- parseLxExpr
+  lxsemicolon
+  pure (Stmt (Eval e) p)
 parseBlock :: LoxParser Stmt
-parseBlock = between lxlbrace lxrbrace $ many parseLxDecl <&> Block
+parseBlock = try $ do 
+  pos <- getSourcePos
+  node <- parseBlockStmts <&> Block
+  pure $ Stmt node pos
+
+parseBlockStmts :: LoxParser [Stmt]
+parseBlockStmts = between lxlbrace lxrbrace (many parseLxDecl)
 parseIfStmt :: LoxParser Stmt
 parseIfStmt = try $ do 
-  lxif 
+  lxif
+  pos <- getSourcePos
   expr <- between lxlparen lxrparen parseLxExpr 
   thenBranch <- parseLxStmt
-  option (LIf expr thenBranch Nothing) $ do 
+  option (Stmt (LIf expr thenBranch Nothing) pos) $ do 
    lxelse 
-   LIf expr thenBranch . Just <$> parseLxStmt
+   node <- LIf expr thenBranch . Just <$> parseLxStmt
+   pure $ Stmt node pos
 parseWhileStmt :: LoxParser Stmt 
 parseWhileStmt = try $ do 
-  lxwhile 
-  LWhile 
+  lxwhile
+  pos <- getSourcePos
+  node <- LWhile 
     <$> between lxlparen lxrparen parseLxExpr 
     <*> parseLxStmt
+  pure $ Stmt node pos
 parseForStmt :: LoxParser Stmt
 parseForStmt = try $ do 
   lxfor 
+  pos <- getSourcePos
   lxlparen
   initializer <- try (lxsemicolon $> Nothing) <|> try (Just <$> parseVarDecl) <|> (Just <$> parseExprStmt)
   initPos <- getSourcePos
@@ -102,14 +133,15 @@ parseForStmt = try $ do
   incrPos <- getSourcePos
   lxrparen
   body <- parseLxStmt
-  let whileBody = Block [body, Eval $ fromMaybe (Expr (Literal LoxNil) incrPos) incrementer]
-      whileLoop = LWhile (fromMaybe (Expr (Literal (LoxBool True)) condPos) condition) whileBody
-  pure $ Block [fromMaybe (Eval (Expr (Literal LoxNil) initPos)) initializer, whileLoop] 
+  let whileBody = Stmt (Block [body, Stmt (Eval $ fromMaybe (Expr (Literal LoxNil) incrPos) incrementer) incrPos]) pos
+      whileLoop = Stmt (LWhile (fromMaybe (Expr (Literal (LoxBool True)) condPos) condition) whileBody) pos
+  pure $ Stmt (Block [fromMaybe (Stmt (Eval (Expr (Literal LoxNil) initPos)) initPos) initializer, whileLoop]) pos
 parseReturnStmt :: LoxParser Stmt
 parseReturnStmt = try $ do 
   lxreturn
-  option (LReturn Nothing) (LReturn . Just <$> parseLxExpr) <* lxsemicolon
-
+  pos <- getSourcePos
+  node <- option (LReturn Nothing) (LReturn . Just <$> parseLxExpr) <* lxsemicolon
+  pure $ Stmt node pos
 
 parseLxExpr :: LoxParser Expr
 parseLxExpr = parseAssign

@@ -8,6 +8,7 @@ import Text.Megaparsec
 import Data.Either (fromRight)
 import Control.Monad.IO.Class (liftIO)
 import Data.Text qualified as T
+import Data.Text.IO qualified as T
 import Polysemy.Haskeline
 import Polysemy hiding (interpret)
 import Polysemy.Embed
@@ -16,6 +17,7 @@ import Polysemy.Reader qualified as PR
 import Polysemy.Fail
 import Polysemy.Error
 import Polysemy.Counter
+import Polysemy.Trace
 import Data.Map.Strict qualified as M
 import Data.List (stripPrefix)
 import Control.Monad (void)
@@ -24,9 +26,36 @@ import Data.Char (isSeparator)
 import Data.Bifunctor qualified as BFu
 import Data.Bitraversable qualified as BFt
 import Polysemy.Fixpoint
+import Lox.ArgParser
+import Lox.Compiler
 import Data.Functor (($>))
+import System.Console.CmdArgs.Implicit (cmdArgs)
+import Data.ByteString.Lazy qualified as B
 main :: IO ()
-main = void $ runFinal $ fixpointToFinal . runError . runCounter . PS.evalState (T.empty, False) . PS.evalState M.empty . PS.evalState M.empty . PS.evalState M.empty . PS.evalState M.empty $ haskelineToIOFinal loop
+main = do 
+  opts <- goodArgs
+  case opts of 
+    OptREPL -> void $ runFinal $ fixpointToFinal . runError . runCounter . PS.evalState (T.empty, False) . PS.evalState M.empty . PS.evalState M.empty . PS.evalState M.empty . PS.evalState M.empty $ haskelineToIOFinal loop
+    OptCompile file saveTo -> do 
+      fileC <- T.readFile file
+      bytecode <- runM . traceToStderr $ compileFile file fileC
+      case bytecode of 
+        Nothing -> putStrLn "failed compile"
+        Just v -> B.writeFile saveTo v
+compileFile :: Member Trace r => String -> T.Text -> Sem r (Maybe B.ByteString)
+compileFile filename file = do
+  let stmts = parse parseLoxFile filename file 
+  case stmts of 
+    Left e -> do
+      trace (errorBundlePretty e)
+      pure Nothing
+    Right ss -> 
+      let compiled = compile ss in
+      case compiled of 
+        Left e -> do
+          trace . showCompileError $ e 
+          pure Nothing
+        Right e -> pure (Just e)
 loop :: Sem [Haskeline, PS.State Heap, PS.State Stack, PS.State RefHeap, PS.State FunClosures, PS.State (T.Text, Bool), Counter, Error InterpError, Fixpoint, Final IO] () 
 loop = do 
   (txt, active) <- PS.get @(T.Text, Bool)

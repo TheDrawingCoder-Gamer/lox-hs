@@ -25,32 +25,32 @@ interpret (Right expr) = ((evaluate expr >>= showValue ) >>= trace) *> ask
 
 execute :: Members LxMembers r => [Stmt] -> Sem r Stack
 execute [] = ask
-execute (Eval expr:rs) = void (evaluate expr) *> execute rs
-execute (Print expr:rs) = (trace =<< showValue =<< evaluate expr) *> execute rs
-execute (VarDef name init:rs) = do 
+execute (Stmt (Eval expr) _:rs) = void (evaluate expr) *> execute rs
+execute (Stmt (Print expr) _:rs) = (trace =<< showValue =<< evaluate expr) *> execute rs
+execute (Stmt (VarDef name init) _:rs) = do 
   case init of 
     Just i -> do
       i' <- evaluate i
       defineVar name i' (execute rs)
     Nothing -> defineVar name LoxNil (execute rs)
-execute (Block ss:rs) = execute ss  *> execute rs
-execute (LIf ee sif selse:rs) = do
+execute (Stmt (Block ss) _:rs) = execute ss  *> execute rs
+execute (Stmt (LIf ee sif selse) _:rs) = do
   e <- evaluate ee
   if valTruthy e then 
     execute [sif]
   else 
     maybe ask (execute . pure) selse
   execute rs
-execute (LWhile cond body:rs) = do 
+execute (stmt@(Stmt (LWhile cond body) _):rs) = do 
   c <- evaluate cond
   if valTruthy c then 
-    execute [body] *> execute [LWhile cond body]
+    execute [body] *> execute [stmt]
   else 
     execute rs
-execute (LFunDecl (FunDecl' name args stmts):rs) = 
+execute (Stmt (LFunDecl (FunDecl' name args stmts)) _:rs) = 
   let fun = LoxFun (Just name) (length args) 0 args stmts False in
     defineFunction name fun (execute rs) 
-execute (ClassDecl name superclass methods:rs) = do
+execute (Stmt (ClassDecl name superclass methods) _:rs) = do
   idN <- makeCount
   methods' <- foldMWithKey (\m name (FunInfo args ss) -> do 
     -- methods have same closure as class
@@ -80,7 +80,7 @@ execute (ClassDecl name superclass methods:rs) = do
                 Just i -> M.insert "super" i stack
   defineClosureWith stack' idN
   local (M.insert name idN) (execute rs)
-execute (LReturn value:_) = throw . ReturnError =<< maybe (pure LoxNil) evaluate value
+execute (Stmt (LReturn value) _:_) = throw . ReturnError =<< maybe (pure LoxNil) evaluate value
 evaluate :: Members LxMembers r => Expr -> Sem r LoxValue
 evaluate (Expr (Binop le re And) _) = evalBinopLazy le re $ \l re ->
   if valTruthy l then 
@@ -188,6 +188,7 @@ evalCallRef (LoxFun name arity idN params stmts isInit) bindedTo args pos = do
     Nothing -> runtimeError pos "Couldn't find closure for function"
     Just cls -> (do
       newStack <- ask >>= defineArgs params args'
+      -- note - even without an ending return, this will return properly
       runReader (M.union cls newStack) (execute stmts) $> LoxNil) 
       `catch` 
       \case 

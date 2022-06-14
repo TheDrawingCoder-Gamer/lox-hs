@@ -25,7 +25,11 @@ dependencies:
   - time
   - parser-combinators
   - hashable
-ghc-options: 
+  - binary
+  - bytestring
+  - lens
+  - cmdargs
+ghc-options:
   - -fplugin=Polysemy.Plugin
 default-extensions:
   - ImportQualifiedPost

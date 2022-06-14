@@ -98,7 +98,11 @@ data ExprNode
   | LSuper Text
   deriving (Eq, Ord, Show)
 
-data Stmt 
+data Stmt = Stmt
+  { stmtNode :: StmtNode
+  , stmtPos :: SourcePos} 
+  deriving (Eq, Ord, Show)
+data StmtNode 
   = Eval Expr
   | Print Expr
   | VarDef Text (Maybe Expr)
@@ -146,6 +150,7 @@ data EvalState = EvalState
 
 type LxMembers = [Reader Stack, State Heap, State RefHeap, State FunClosures, Counter, Error InterpError, Fixpoint, Trace, Final IO]
 {-# COMPLETE FunDecl' #-}
+{-# COMPLETE Eval, Print, VarDef, Block, LIf, LWhile, ClassDecl, LReturn, LFunDecl' #-}
 pattern LFunDecl' name args stmts = LFunDecl (FunDecl' name args stmts)
 pattern FunDecl' name args stmts = FunDecl name (FunInfo args stmts)
 
