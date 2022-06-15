@@ -54,7 +54,7 @@ compileStmt (Stmt (LIf e ifstmt estmt) pos) = do -- todo: broken
   daIfBytes <- execBuild (compileStmt ifstmt)
   let ifByteLen = B.length daIfBytes
   build OpJumpIfFalse
-  if ifByteLen > (2 ^ 15) - 5 then
+  if ifByteLen > (2 ^ 15) - jumpOpSize then
     tooMuchToJump pos
   else do 
     case estmt of 
@@ -63,8 +63,9 @@ compileStmt (Stmt (LIf e ifstmt estmt) pos) = do -- todo: broken
         build OpPop
         buildRaw (lazyByteString daIfBytes)
       Just selse -> do
-        buildRaw (int16BE (fromIntegral ifByteLen + 5))
+        buildRaw (int16BE (fromIntegral ifByteLen + jumpOpSize))
         build OpPop
+        buildRaw (lazyByteString daIfBytes)
         daElseBytes <- execBuild (compileStmt selse)
         let elseByteLen = B.length daElseBytes
         if elseByteLen > 2 ^ 15 - 1 then
@@ -99,9 +100,13 @@ compileStmt (Stmt (LWhile e loop) pos) = do
     build OpPop
 
 compileStmt (Stmt (LFunDecl' name args ss) pos) = do
+  declareVariable pos name
+  defineVariable name
   -- pass through errors (and state... test this)
   ssbytes <- execBuild (beginScope *> compilePut ss *> endScope)
-  build (ObjFunction (length args) (Chunk ssbytes) name)
+  build (ValFunction (ObjFunction (length args) (Chunk ssbytes) name))
+  build OpConstant
+  
 
 -- todo: ensure it's actually returnable
 compileStmt (Stmt (LReturn e) _) = do
