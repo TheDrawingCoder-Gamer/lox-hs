@@ -9,7 +9,7 @@ import Data.Binary.Put
 import Data.Binary.Get
 import Data.Binary
 import Data.Bool (bool)
-import GHC.Generics (Generic)
+import GHC.Generics (Generic(..))
 import Data.ByteString.Lazy qualified as B
 import Data.List (sortBy)
 
@@ -73,11 +73,16 @@ data Obj = ObjFunction
   { funArity :: Int
   , funChunk :: Chunk
   , funName  :: Text }
-  | ObjUnused -- force Binary to use sum encoding
   deriving (Generic, Show)
-  deriving anyclass Binary
 
-
+instance Binary Obj where -- force sum encoding by putting it manually 
+  put a = putWord8 0 *> gput (from a)
+  get = do 
+    daCode <- getWord8
+    if daCode /= 0 then 
+      fail "Invalid code for Obj"
+    else 
+      to <$> gget 
 
 
 data FunctionType 
