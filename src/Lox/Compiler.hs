@@ -18,6 +18,11 @@ import Control.Lens.Getter ((^.), view)
 import Control.Lens.Cons (_head)
 import Control.Lens.Fold ((^?))
 import Control.Monad (replicateM_)
+import Data.Bifunctor qualified as BFu
+import Polysemy.Counter
+import Polysemy.Tagged
+import Data.Binary (encode, decode)
+import Polysemy.ListBuild
 data Local = Local 
   { localName :: T.Text
   , localDepth :: Int 
@@ -25,153 +30,162 @@ data Local = Local
 -- as much as i'd love to reuse my env impl, it doesn't lend itself well to compilation
 data CompileState = CompileState
   { _locals :: [Local]
-  , _scopeDepth :: Int 
+  , _scopeDepth :: Int
+  , _functionType :: FunctionType
   }
 
 makeLenses ''CompileState
 
-compile :: [Stmt] -> Either CompileError B.ByteString
-compile = run . evalState (CompileState [] 0) . runError . execBuild . compilePut
+data CounterKind 
+  = CountConstants
+  | CountChunks
+defaultState :: CompileState
+defaultState = CompileState [] 0 TypeScript
+compileBytes :: [Stmt] -> Either CompileError B.ByteString
+compileBytes = BFu.second encode . compile
+compile :: [Stmt] -> Either CompileError Chunk
+compile stmts = 
+  let daRes = run . evalState defaultState . runError . runCounter . untag @CountChunks. runCounter .untag @CountConstants . runListBuild @Obj . execListBuild @OpCode . compileChunk $ stmts in 
+    BFu.second (uncurry (flip Chunk)) daRes
 
-compilePut :: CompMembers r => [Stmt] -> Sem r ()
-compilePut = 
+compileChunk :: CompMembers r => [Stmt] -> Sem r ()
+compileChunk = 
   foldr ((*>) . compileStmt) (pure ())
 
 compileStmt :: CompMembers r => Stmt -> Sem r ()
-compileStmt (Stmt (Eval e) _) = compileExpr e *> build OpPop
-compileStmt (Stmt (Print e) _) = compileExpr e *> build OpPrint
+compileStmt (Stmt (Eval e) _) = compileExpr e *> lsBuild OpPop
+compileStmt (Stmt (Print e) _) = compileExpr e *> lsBuild OpPrint
 compileStmt (Stmt (VarDef name def) pos) = do
   declareVariable pos name
   case def of 
-    Nothing -> build OpNil
+    Nothing -> lsBuild OpNil
     Just v -> compileExpr v
   defineVariable name 
 
-compileStmt (Stmt (Block ss) pos) = beginScope *> compilePut ss *> endScope
+compileStmt (Stmt (Block ss) pos) = beginScope *> compileChunk ss *> endScope
 
 compileStmt (Stmt (LIf e ifstmt estmt) pos) = do -- todo: broken 
   compileExpr e
-  daIfBytes <- execBuild (compileStmt ifstmt)
-  let ifByteLen = B.length daIfBytes
-  build OpJumpIfFalse
-  if ifByteLen > (2 ^ 15) - jumpOpSize then
+  daIfBytes <- execListBuild @OpCode (compileStmt ifstmt)
+  let ifByteLen = length daIfBytes
+  if ifByteLen > (2 ^ 15) - 1 then
     tooMuchToJump pos
   else do 
     case estmt of 
       Nothing -> do
-        buildRaw (int16BE (fromIntegral ifByteLen))
-        build OpPop
-        buildRaw (lazyByteString daIfBytes)
+        lsBuild $ OpJumpIfFalse (fromIntegral ifByteLen)
+        lsBuild OpPop
+        lsBuildMore daIfBytes
       Just selse -> do
-        buildRaw (int16BE (fromIntegral ifByteLen + jumpOpSize))
-        build OpPop
-        buildRaw (lazyByteString daIfBytes)
-        daElseBytes <- execBuild (compileStmt selse)
-        let elseByteLen = B.length daElseBytes
+        lsBuild (OpJumpIfFalse (fromIntegral ifByteLen + 1))
+        lsBuild OpPop
+        lsBuildMore daIfBytes
+        daElseBytes <- execListBuild @OpCode (compileStmt selse)
+        let elseByteLen = length daElseBytes
         if elseByteLen > 2 ^ 15 - 1 then
           tooMuchToJump pos
         else do 
-          build OpJump
-          buildRaw (int16BE (fromIntegral elseByteLen + 1))
-          build OpPop
-          buildRaw (lazyByteString daElseBytes)
+          lsBuild (OpJump (fromIntegral elseByteLen + 1))
+          lsBuild OpPop
+          lsBuildMore daElseBytes
 
 compileStmt (Stmt (LWhile e loop) pos) = do 
-  daLoop <- execBuild (do 
+  daLoop <- execListBuild @OpCode (do 
     compileExpr e
-    daBody <- execBuild (do 
-      build OpPop 
+    daBody <- execListBuild @OpCode (do 
+      lsBuild OpPop 
       compileStmt loop) 
-    let bodyLen = B.length daBody
+    let bodyLen = length daBody
     if bodyLen > 2 ^ 15 then
       tooMuchToJump pos
     else do 
-      build OpJumpIfFalse
-      buildRaw (int16BE (fromIntegral bodyLen + 1))
-      build OpPop
-      buildRaw (lazyByteString daBody))
-  let loopLen = B.length daLoop
+      lsBuild $ OpJumpIfFalse (fromIntegral bodyLen + 1)
+      lsBuild OpPop
+      lsBuildMore daBody)
+  let loopLen = length daLoop
   if loopLen > 2 ^ 15 then 
     tooMuchToJump pos 
   else do
-    buildRaw (lazyByteString daLoop)
-    build OpJump
-    buildRaw (int16BE (negate (fromIntegral loopLen + jumpOpSize)))
-    build OpPop
+    lsBuildMore daLoop
+    lsBuild $ OpJump (negate (fromIntegral loopLen + 1))
+    lsBuild OpPop
 
 compileStmt (Stmt (LFunDecl' name args ss) pos) = do
   declareVariable pos name
+  markReady
+  -- pass through errors only
+  -- this has the same effect as making a new compiler and running it in c
+  -- also allow function counting to pass through LOL
+  (consts, opcodes) <- runCounter . untag @CountConstants . evalState (set functionType TypeFunction defaultState)  . runListBuild @Obj $ execListBuild @OpCode (beginScope *> compileChunk ss *> endScope)
+  idN <- tag @CountConstants makeCount
+  let objFun = ObjFunction (length args) (Chunk opcodes consts) name
+  lsBuild (OpConstant (ValObj idN))
+  lsBuild @Obj objFun
   defineVariable name
-  -- pass through errors (and state... test this)
-  ssbytes <- execBuild (beginScope *> compilePut ss *> endScope)
-  build (ValFunction (ObjFunction (length args) (Chunk ssbytes) name))
-  build OpConstant
   
 
 -- todo: ensure it's actually returnable
 compileStmt (Stmt (LReturn e) _) = do
   case e of 
-    Nothing -> build OpNil
+    Nothing -> lsBuild OpNil
     Just v  -> compileExpr v
 
-  build OpReturn
+  lsBuild OpReturn
   
 compileExpr :: CompMembers r => Expr -> Sem r ()
 compileExpr (Expr (Literal v) _) = 
   case v of 
-    LoxString t -> build OpConstant *> build (ValString t)
-    LoxNil      -> build OpNil
-    LoxNumber d -> build OpConstant *> build (ValNumber d)
-    LoxBool True -> build OpTrue
-    LoxBool False -> build OpFalse
+    LoxString t -> lsBuild (OpConstant (ValString t))
+    LoxNil      -> lsBuild OpNil
+    LoxNumber d -> lsBuild (OpConstant (ValNumber d))
+    LoxBool True -> lsBuild OpTrue
+    LoxBool False -> lsBuild OpFalse
     _ -> undefined -- unreachable
 
 compileExpr (Expr (Unary k v) _) =  compileExpr v *> 
   case k of 
-    Not -> build OpNot
-    Negate -> build OpNegate
+    Not -> lsBuild OpNot
+    Negate -> lsBuild OpNegate
 
 compileExpr (Expr (Binop l r And) pos) = do 
   compileExpr l
-  daOtherPart <- execBuild (do
-                    build OpPop
+  daOtherPart <- execListBuild @OpCode (do
+                    lsBuild OpPop
                     compileExpr r)
-  let rexprLen = B.length daOtherPart
-  build OpJumpIfFalse
+  let rexprLen = length daOtherPart
   if rexprLen > 2 ^ 15 then
     tooMuchToJump pos
   else do
-    buildRaw (int16BE (fromIntegral rexprLen))
-    buildRaw (lazyByteString daOtherPart)
+    lsBuild (OpJumpIfFalse (fromIntegral rexprLen))
+    lsBuildMore daOtherPart
 compileExpr (Expr (Binop l r Or) pos) = do 
   compileExpr l
-  build OpJumpIfFalse
-  buildRaw (word16BE 5) -- length of opcode + Word16
-  daOtherPart <- execBuild (do 
-                    build OpPop
+  lsBuild (OpJumpIfFalse 5) -- length of opcode + Word16
+  daOtherPart <- execListBuild @OpCode (do 
+                    lsBuild @OpCode OpPop
                     compileExpr r)
-  let rexprLen = B.length daOtherPart
-  build OpJump
+  let rexprLen = length daOtherPart
   if rexprLen > 2 ^ 15 then 
     tooMuchToJump pos
-  else do 
-    buildRaw (int16BE (fromIntegral rexprLen))
-    buildRaw (lazyByteString daOtherPart)
+  else do
+    
+    lsBuild (OpJump (fromIntegral rexprLen))
+    lsBuildMore daOtherPart
 
     
 
 compileExpr (Expr (Binop l r k) _) = compileExpr l *> compileExpr r *> 
   case k of 
-    Equals -> build OpEqual
-    Unequal -> build OpEqual *> build OpNot
-    Greater -> build OpGreater
-    GreaterEq -> build OpLess *> build OpNot
-    Less -> build OpLess
-    LessEq -> build OpGreater *> build OpNot
-    Plus -> build OpAdd
-    Minus -> build OpSubtract
-    Times -> build OpMultiply
-    Divide -> build OpDivide
+    Equals -> lsBuild OpEqual
+    Unequal -> lsBuild OpEqual *> lsBuild OpNot
+    Greater -> lsBuild OpGreater
+    GreaterEq -> lsBuild OpLess *> lsBuild OpNot
+    Less -> lsBuild OpLess
+    LessEq -> lsBuild OpGreater *> lsBuild OpNot
+    Plus -> lsBuild OpAdd
+    Minus -> lsBuild OpSubtract
+    Times -> lsBuild OpMultiply
+    Divide -> lsBuild OpDivide
 
 compileExpr (Expr (Identifier name) pos) = namedVariable pos False name
 
@@ -184,7 +198,7 @@ defineVariable :: CompMembers r => T.Text -> Sem r ()
 defineVariable name = do 
   curDepth <- use scopeDepth
   if curDepth == 0 then 
-    build OpDefineGlobal *> build name
+    lsBuild $ OpDefineGlobal name
   else do
     markReady
     pure ()
@@ -206,7 +220,12 @@ addLocal name = do
   prepending locals (Local name curDepth False)
 
 markReady :: CompMembers r => Sem r () 
-markReady = modifying (locals._head) (\l -> l { localReady = True} )
+markReady = do
+  depth <- use scopeDepth
+  if depth == 0 then 
+    pure ()
+  else
+    modifying (locals._head) (\l -> l { localReady = True} )
 localInScope :: CompMembers r => T.Text -> Sem r Bool
 localInScope name = searchInScope <$> use locals <*> use scopeDepth
   where
@@ -230,8 +249,8 @@ namedVariable :: CompMembers r => SourcePos -> Bool -> T.Text -> Sem r ()
 namedVariable pos assign name = do 
   existsLocal <- resolveLocal pos name
   let setOp = if existsLocal then OpSetLocal else OpSetGlobal
-      getOp = if existsLocal then OpGetLocal else OpSetGlobal
-  build (if assign then setOp else getOp) *> build name
+      getOp = if existsLocal then OpGetLocal else OpGetGlobal
+  lsBuild $ (if assign then setOp else getOp) name
 
 beginScope :: CompMembers r => Sem r ()
 beginScope = scopeDepth += 1
@@ -240,7 +259,7 @@ endScope :: CompMembers r => Sem r ()
 endScope = do 
   scopeDepth -= 1
   (newLocals, removed) <- popAll <$> use locals <*> use scopeDepth <*> pure 0
-  replicateM_  removed (build OpPop)
+  replicateM_  removed (lsBuild OpPop)
   assign locals newLocals
   where 
     popAll :: [Local] -> Int -> Int -> ([Local], Int)
@@ -249,15 +268,13 @@ endScope = do
         popAll xs depth (n + 1) 
       else (ls, n)
     popAll [] _ n = ([], n)
-type CompMembers r = Members [State CompileState, Build, Error CompileError] r
+type CompMembers r = Members [ListBuild OpCode, ListBuild Obj, State CompileState, Error CompileError, Tagged 'CountConstants Counter, Tagged 'CountChunks Counter] r
 data CompileError 
   = JumpSizeError SourcePos 
   | CompError SourcePos T.Text
 showCompileError :: CompileError -> String
 showCompileError (JumpSizeError pos) = "Error at " ++ sourcePosPretty pos ++ ": Too much code to jump over"
 showCompileError (CompError pos txt) = "Error at " ++ sourcePosPretty pos ++ ": " ++ T.unpack txt
-jumpOpSize :: (Integral a) => a
-jumpOpSize = 5
 tooMuchToJump :: CompMembers r => SourcePos -> Sem r a
 tooMuchToJump pos = throw (JumpSizeError pos)
 

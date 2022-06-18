@@ -32,6 +32,7 @@ executable lox-hs
       Polysemy.Build
       Polysemy.Counter
       Polysemy.Haskeline
+      Polysemy.ListBuild
       Polysemy.Megaparsec
       Polysemy.StackState
       Paths_lox_hs

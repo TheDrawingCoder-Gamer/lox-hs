@@ -50,7 +50,7 @@ compileFile filename file = do
       trace (errorBundlePretty e)
       pure Nothing
     Right ss -> 
-      let compiled = compile ss in
+      let compiled = compileBytes ss in
       case compiled of 
         Left e -> do
           trace . showCompileError $ e 

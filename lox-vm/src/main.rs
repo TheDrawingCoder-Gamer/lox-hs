@@ -1,7 +1,7 @@
-use crate::lox::vm::{OpCode, LxValue};
+use crate::lox::vm::{OpCode, LxValue, Chunk, LxObject};
 use std::env;
 use std::fs::File;
-use std::io::{Read, BufRead, BufReader, Seek, Error, ErrorKind, Result};
+use std::io::{Read, BufRead, BufReader, Error, ErrorKind, Result};
 mod lox {
   pub mod vm;
 }
@@ -16,9 +16,10 @@ fn main() -> std::io::Result<()> {
             Some(path) => {
               let file = File::open(path)?;
               let mut reader = BufReader::new(file);
-              let opcodes = parse_op_codes(&mut reader, None)?;
+              let opcodes = parse_chunk(&mut reader)?;
+              
               println!("{:#?}", opcodes);
-              return Ok(());
+              Ok(())
             } 
             None => {
               println!("decompile needs a file to decompile");
@@ -34,31 +35,49 @@ fn main() -> std::io::Result<()> {
     }
     None => {
       println!("command not given");
-      return Ok(());
+      Ok(())
     }
   }
 }
-fn parse_op_codes<R:BufRead + Seek>(source: &mut R, size: Option<u64>) -> Result<Vec<OpCode>> {
+fn parse_chunk<R:BufRead>(source: &mut R) -> Result<Chunk> {
+  let size = read_u64(source)?;
+  println!("chunk opcode n {}", size);
+  let opcodes = parse_op_codes(source, size)?;
+  let consts_size = read_u64(source)?;
+  println!("chunk constants n {}", consts_size);
+  let constants = parse_constants(source, consts_size)?;
+  Ok(Chunk {opcodes: opcodes, constants: constants}) 
+}
+fn parse_op_codes<R:BufRead>(source: &mut R, size: u64) -> Result<Vec<OpCode>> {
+  if size == 0 { return Ok(Vec::new()); } 
   let mut vec : Vec<OpCode> = Vec::new();
-  let start_pos = source.stream_position()?;
+  let mut count = 0; 
   loop {
-    let at_eof = !has_data_left(source)?;
-    if at_eof { break; } 
     let opcode = parse_op_code(source)?;
     vec.push(opcode);
-    if let Some(limit) = size {
-      let cur_pos = source.stream_position()?;
-      let amount_taken = cur_pos - start_pos; 
-      if amount_taken > limit {
-        return Err(Error::new(ErrorKind::UnexpectedEof, "Took too many bytes"));
-      } else if amount_taken == limit {
-        break;
-      }
+    count += 1; 
+    if count == size {
+      break;
     }
+    
   } 
   return Ok(vec);
 }
-fn parse_op_code<R:BufRead + Seek>(source: &mut R) -> Result<OpCode> {
+fn parse_constants<R:BufRead>(source: &mut R, size: u64) -> Result<Vec<LxObject>> {
+  if size == 0 { return Ok(Vec::new()); }
+  let mut vec : Vec<LxObject> = Vec::new();
+  let mut count = 0; 
+  loop {
+    let constant = parse_constant(source)?;
+    vec.push(constant);
+    count += 1;
+    if count == size {
+      break;
+    }
+  }
+  Ok(vec)
+}
+fn parse_op_code<R:BufRead>(source: &mut R) -> Result<OpCode> {
   // because I'm already borrowing it I don't need to reborrow it???
   let opcode = get_one_byte(source)?;
   match opcode { 
@@ -78,14 +97,8 @@ fn parse_op_code<R:BufRead + Seek>(source: &mut R) -> Result<OpCode> {
         2 => Ok(OpCode::OpConstant(LxValue::ValNumber(read_f64(source)?))),
         3 => Ok(OpCode::OpConstant(LxValue::ValString(read_string_len(source)?))), 
         4 => {
-          let arity = read_i64(source)?;
-          let size  = read_u64(source)?; // size of chunk
-          // take is sane in that Take<BufRead> has the trait BufRead
-          
-          
-          let opcodes = parse_op_codes(source, Some(size))?;
-          let name = read_string_len(source)?;
-          return Ok(OpCode::OpConstant(LxValue::ValFunction(arity, opcodes, name)));
+          let ptr = read_u64(source)?;
+          Ok(OpCode::OpConstant(LxValue::ValObjPtr(ptr)))
         }
         _ => Err(Error::new(ErrorKind::InvalidData, "Invalid constant kind"))
       } 
@@ -130,6 +143,20 @@ fn parse_op_code<R:BufRead + Seek>(source: &mut R) -> Result<OpCode> {
 
 }
 
+fn parse_constant<R:BufRead>(source: &mut R) -> Result<LxObject> {
+  let kind = get_one_byte(source)?;
+  println!("const kind: {}", kind);
+  match kind {
+    0 => {
+      let arity = read_i64(source)?;
+      let chunk = parse_chunk(source)?;
+      println!("{:#?}", chunk);
+      let name = read_string_len(source)?;
+      Ok(LxObject::ObjFunction(arity, chunk, name))
+    }
+    _ => Err(Error::new(ErrorKind::InvalidData, "invalid object"))
+  }
+}
 fn read_string_len<R:BufRead>(source: &mut R) -> Result<String> {
   let size = read_u64(source)?; // put bytestring puts it as BIG ENDIAN!
   let mut string = String::new();
@@ -178,6 +205,8 @@ fn get_one_byte<R:BufRead>(source: &mut R) -> Result<u8> {
   return Ok(*buf.get(0).unwrap());
 }
 
+/*
 fn has_data_left<R:BufRead>(source: &mut R) -> Result<bool> {
   return source.fill_buf().map(|b| !b.is_empty());
 }
+*/

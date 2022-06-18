@@ -5,7 +5,16 @@ pub enum LxValue {
   ValNil,
   ValNumber(f64),
   ValString(String),
-  ValFunction(i64, Vec<OpCode>, String)
+  ValObjPtr(u64)
+}
+#[derive(Debug)]
+pub enum LxObject {
+  ObjFunction(i64, Chunk, String)
+}
+#[derive(Debug)]
+pub struct Chunk {
+  pub opcodes: Vec<OpCode>,
+  pub constants: Vec<LxObject>
 }
 #[derive(Debug)]
 pub enum OpCode { 
